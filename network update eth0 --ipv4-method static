@@ -1,0 +1,6 @@
+network update eth0 --ipv4-method static --ipv4-address 10.0.0.196/24 --ipv4-gateway 10.0.0.1 --ipv4-nameserver 1.1.1.1
+
+
+
+
+ scp /Users/jerrymedeiros/Documents/indi/allsky-cloud-analysis/scripts/sky_thermal_postsave_hook.py allsky-indi@allsky-indi:~/
