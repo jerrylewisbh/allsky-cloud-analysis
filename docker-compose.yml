@@ -25,5 +25,17 @@ services:
     depends_on:
       - db
 
+  grafana:
+    image: grafana/grafana-oss:latest
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning
+    depends_on:
+      - db
+
 volumes:
   postgres_data:
+  grafana_data:
