@@ -19,8 +19,8 @@ POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "allsky")
 POSTGRES_DB = os.getenv("POSTGRES_DB", "cloud_analysis")
 SQLALCHEMY_DATABASE_URL = f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@db:5432/{POSTGRES_DB}"
 
-LAT = float(os.getenv("LOCATION_LATITUDE", "33.0"))
-LON = float(os.getenv("LOCATION_LONGITUDE", "-84.0"))
+LAT = os.getenv("LOCATION_LATITUDE", "33.0")
+LON = os.getenv("LOCATION_LONGITUDE", "-84.0")
 
 engine = create_engine(SQLALCHEMY_DATABASE_URL)
 
@@ -29,7 +29,9 @@ while not connected:
     try:
         models.Base.metadata.create_all(bind=engine)
         connected = True
-    except Exception:
+        print(f"DB Connected. Location: {LAT}, {LON}")
+    except Exception as e:
+        print(f"Waiting for DB... {e}")
         time.sleep(2)
 
 def get_db():
@@ -40,19 +42,25 @@ def get_db():
         db.close()
 
 def calculate_ephemeris(dt):
-    obs = ephem.Observer()
-    obs.lat = str(LAT)
-    obs.lon = str(LON)
-    obs.date = dt
-    
-    sun = ephem.Sun(obs)
-    moon = ephem.Moon(obs)
-    
-    return {
-        "sun_alt": math.degrees(sun.alt),
-        "moon_alt": math.degrees(moon.alt),
-        "moon_phase": moon.moon_phase * 100
-    }
+    try:
+        obs = ephem.Observer()
+        obs.lat = str(LAT)
+        obs.lon = str(LON)
+        obs.date = dt
+        
+        sun = ephem.Sun(obs)
+        moon = ephem.Moon(obs)
+        
+        results = {
+            "sun_alt": float(math.degrees(sun.alt)),
+            "moon_alt": float(math.degrees(moon.alt)),
+            "moon_phase": float(moon.moon_phase * 100)
+        }
+        print(f"EPH: Sun {results['sun_alt']:.1f}, Moon {results['moon_alt']:.1f}, Phase {results['moon_phase']:.1f}")
+        return results
+    except Exception as e:
+        print(f"EPH ERROR: {e}")
+        return {"sun_alt": 0.0, "moon_alt": 0.0, "moon_phase": 0.0}
 
 @app.middleware("http")
 async def ambient_weather_interceptor(request: Request, call_next):
@@ -70,13 +78,11 @@ async def ambient_weather_interceptor(request: Request, call_next):
                 db.add(new_record)
                 db.commit()
                 return Response(content='{"status":"success"}', media_type="application/json")
+            except Exception:
+                pass
             finally:
                 db.close()
     return await call_next(request)
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
 
 class IngestPayload(BaseModel):
     allsky_path: str
@@ -89,10 +95,10 @@ class IngestPayload(BaseModel):
 def ingest_data(payload: IngestPayload, db: Session = Depends(get_db)):
     sync_time = payload.captured_at or datetime.utcnow()
     
-    # 1. Ephemeris calculation
+    # Calculate Sun/Moon
     eph = calculate_ephemeris(sync_time)
     
-    # 2. Nearest neighbor weather sync
+    # Sync Weather
     closest_weather = db.query(models.WeatherRecord)\
         .order_by(func.abs(func.extract('epoch', models.WeatherRecord.timestamp) - func.extract('epoch', sync_time)))\
         .first()
@@ -112,4 +118,9 @@ def ingest_data(payload: IngestPayload, db: Session = Depends(get_db)):
     db.add(db_capture)
     db.commit()
     db.refresh(db_capture)
+    print(f"INGEST SUCCESS: id {db_capture.id}, synced weather {db_capture.weather_record_id}")
     return {"status": "success", "id": db_capture.id}
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
