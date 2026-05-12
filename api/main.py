@@ -37,56 +37,42 @@ def get_db():
 @app.middleware("http")
 async def ambient_weather_interceptor(request: Request, call_next):
     full_url = str(request.url)
-    
-    # If the URL contains weather parameters anywhere (path or query)
     if "PASSKEY=" in full_url or "stationtype=" in full_url:
-        print(f"DEBUG: Intercepted potential weather URL: {full_url}")
-        
-        # Find where the parameters actually start
-        # They might start with PASSKEY or stationtype
         start_marker = "PASSKEY=" if "PASSKEY=" in full_url else "stationtype="
         _, params_part = full_url.split(start_marker, 1)
         params_str = start_marker + params_part
-        
-        # Standardize: parse_qs expects a standard query string
-        # If there are any remaining / or leading &, they will be handled by parse_qs
         params = urllib.parse.parse_qs(params_str)
         data = {k: v[0] for k, v in params.items()}
-        
         if data:
             db = Session(bind=engine)
             try:
                 new_record = models.WeatherRecord(raw_data=data)
                 db.add(new_record)
                 db.commit()
-                print(f"SUCCESS: Saved weather data for date: {data.get('dateutc', 'unknown')}")
-                # Return 200 OK immediately to satisfy the station
                 return Response(content='{"status":"success"}', media_type="application/json")
-            except Exception as e:
-                print(f"ERROR: Failed to save weather record: {e}")
             finally:
                 db.close()
-
     return await call_next(request)
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
 
 class IngestPayload(BaseModel):
     allsky_path: str
     thermal_path: str
     thermal_frame: List[float]
     esp32_sensors: Dict
+    captured_at: Optional[datetime] = None  # New field for better sync
 
 @app.post("/ingest")
 def ingest_data(payload: IngestPayload, db: Session = Depends(get_db)):
-    now = datetime.utcnow()
+    # Use provided capture time, or fall back to 'now'
+    sync_time = payload.captured_at or datetime.utcnow()
+    
+    # Find the closest weather record to the ACTUAL capture time
     closest_weather = db.query(models.WeatherRecord)\
-        .order_by(func.abs(func.extract('epoch', models.WeatherRecord.timestamp) - func.extract('epoch', now)))\
+        .order_by(func.abs(func.extract('epoch', models.WeatherRecord.timestamp) - func.extract('epoch', sync_time)))\
         .first()
 
     db_capture = models.Capture(
+        timestamp=sync_time,
         allsky_path=payload.allsky_path,
         thermal_path=payload.thermal_path,
         thermal_frame=payload.thermal_frame,
@@ -97,4 +83,8 @@ def ingest_data(payload: IngestPayload, db: Session = Depends(get_db)):
     db.add(db_capture)
     db.commit()
     db.refresh(db_capture)
-    return {"status": "success", "id": db_capture.id, "synced_weather_id": db_capture.weather_record_id}
+    return {"status": "success", "id": db_capture.id}
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
