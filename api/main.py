@@ -19,7 +19,6 @@ SQLALCHEMY_DATABASE_URL = f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@db:
 
 engine = create_engine(SQLALCHEMY_DATABASE_URL)
 
-# Connect to DB
 connected = False
 while not connected:
     try:
@@ -35,41 +34,40 @@ def get_db():
     finally:
         db.close()
 
-# --- AMBIENT WEATHER MIDDLEWARE ---
-# Intercepts every request to check if it's a "broken" Ambient Weather ping
 @app.middleware("http")
 async def ambient_weather_interceptor(request: Request, call_next):
-    # Get the raw path and query string
-    path = request.url.path
-    query = request.url.query
-    full_str = f"{path}?{query}" if query else path
+    full_url = str(request.url)
     
-    # Ambient stations often send "weather&PASSKEY=..." which comes in as one big path string
-    if "PASSKEY" in full_str or "stationtype" in full_str:
-        # Clean up the string (remove leading / and 'weather' prefix if present)
-        clean_str = full_str.lstrip("/").replace("weather", "", 1).lstrip("&").lstrip("?")
+    # If the URL contains weather parameters anywhere (path or query)
+    if "PASSKEY=" in full_url or "stationtype=" in full_url:
+        print(f"DEBUG: Intercepted potential weather URL: {full_url}")
         
-        # Parse into dictionary
-        params = urllib.parse.parse_qs(clean_str)
+        # Find where the parameters actually start
+        # They might start with PASSKEY or stationtype
+        start_marker = "PASSKEY=" if "PASSKEY=" in full_url else "stationtype="
+        _, params_part = full_url.split(start_marker, 1)
+        params_str = start_marker + params_part
+        
+        # Standardize: parse_qs expects a standard query string
+        # If there are any remaining / or leading &, they will be handled by parse_qs
+        params = urllib.parse.parse_qs(params_str)
         data = {k: v[0] for k, v in params.items()}
         
         if data:
-            # Save to DB manually since we are in middleware
             db = Session(bind=engine)
             try:
                 new_record = models.WeatherRecord(raw_data=data)
                 db.add(new_record)
                 db.commit()
-                print(f"Middleware Captured weather: {data.get('dateutc', 'unknown')}")
+                print(f"SUCCESS: Saved weather data for date: {data.get('dateutc', 'unknown')}")
+                # Return 200 OK immediately to satisfy the station
+                return Response(content='{"status":"success"}', media_type="application/json")
+            except Exception as e:
+                print(f"ERROR: Failed to save weather record: {e}")
             finally:
                 db.close()
-            
-            # Return success to the station immediately
-            return Response(content='{"status":"success"}', media_type="application/json")
 
     return await call_next(request)
-
-# --- STANDARD ROUTES ---
 
 @app.get("/health")
 def health():
@@ -84,7 +82,6 @@ class IngestPayload(BaseModel):
 @app.post("/ingest")
 def ingest_data(payload: IngestPayload, db: Session = Depends(get_db)):
     now = datetime.utcnow()
-    # Nearest neighbor sync
     closest_weather = db.query(models.WeatherRecord)\
         .order_by(func.abs(func.extract('epoch', models.WeatherRecord.timestamp) - func.extract('epoch', now)))\
         .first()
@@ -101,4 +98,3 @@ def ingest_data(payload: IngestPayload, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(db_capture)
     return {"status": "success", "id": db_capture.id, "synced_weather_id": db_capture.weather_record_id}
-
