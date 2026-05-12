@@ -20,6 +20,9 @@ services:
       POSTGRES_USER: allsky
       POSTGRES_PASSWORD: allsky
       POSTGRES_DB: cloud_analysis
+      # SET YOUR LOCATION HERE
+      LOCATION_LATITUDE: "33.0"
+      LOCATION_LONGITUDE: "-84.0"
     ports:
       - "8000:8000"
     depends_on:

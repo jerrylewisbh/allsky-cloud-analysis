@@ -20,5 +20,10 @@ class Capture(Base):
     thermal_frame = Column(ARRAY(Float))
     esp32_sensors = Column(JSON)
     
+    # New ephemeris fields
+    sun_alt = Column(Float)
+    moon_alt = Column(Float)
+    moon_phase = Column(Float) # 0-100
+    
     # We will link the closest weather record here
     weather_record_id = Column(Integer, ForeignKey("weather_records.id"), nullable=True)
