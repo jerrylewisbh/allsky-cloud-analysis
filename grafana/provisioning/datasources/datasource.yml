@@ -3,11 +3,13 @@ apiVersion: 1
 datasources:
   - name: AllskyDB
     type: postgres
+    access: proxy
     url: db:5432
     user: allsky
+    database: cloud_analysis
     secureJsonData:
       password: allsky
-    database: cloud_analysis
     jsonData:
       sslmode: 'disable'
       postgresVersion: 15
+      timescaledb: false
