@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: allsky
+      POSTGRES_PASSWORD: allsky
+      POSTGRES_DB: cloud_analysis
+    volumes:
+      - postgres_data:/var/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  api:
+    build: 
+      context: .
+      dockerfile: api/Dockerfile
+    environment:
+      POSTGRES_USER: allsky
+      POSTGRES_PASSWORD: allsky
+      POSTGRES_DB: cloud_analysis
+    ports:
+      - "8000:8000"
+    depends_on:
+      - db
+
+volumes:
+  postgres_data:
