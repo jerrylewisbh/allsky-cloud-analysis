@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, Request
+from fastapi import FastAPI, Depends, Request, Response
 from sqlalchemy.orm import Session
 from sqlalchemy import create_engine, func
 from . import models
@@ -19,6 +19,7 @@ SQLALCHEMY_DATABASE_URL = f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@db:
 
 engine = create_engine(SQLALCHEMY_DATABASE_URL)
 
+# Connect to DB
 connected = False
 while not connected:
     try:
@@ -34,34 +35,45 @@ def get_db():
     finally:
         db.close()
 
-# Catch-all handler for weird Ambient Weather paths
-@app.get("/{path:path}")
-async def catch_all_weather(path: str, request: Request, db: Session = Depends(get_db)):
-    # If the URL looks like "weather&PASSKEY=..." it comes in as the path
-    # We parse the full raw URL string to extract the real parameters
-    full_path = str(request.url)
+# --- AMBIENT WEATHER MIDDLEWARE ---
+# Intercepts every request to check if it's a "broken" Ambient Weather ping
+@app.middleware("http")
+async def ambient_weather_interceptor(request: Request, call_next):
+    # Get the raw path and query string
+    path = request.url.path
+    query = request.url.query
+    full_str = f"{path}?{query}" if query else path
     
-    # Extract everything after the server address
-    # We look for common Ambient keywords like PASSKEY or stationtype
-    if "PASSKEY" in full_path or "stationtype" in full_path:
-        # Split by both ? and & to find all key=value pairs
-        query_str = full_path.split("?", 1)[-1] if "?" in full_path else path
-        # Normalize: sometimes the station sends /weather&... 
-        if query_str.startswith("weather"):
-            query_str = query_str.replace("weather", "", 1).lstrip("&")
-            
-        params = urllib.parse.parse_qs(query_str)
-        # Flatten the list values from parse_qs
+    # Ambient stations often send "weather&PASSKEY=..." which comes in as one big path string
+    if "PASSKEY" in full_str or "stationtype" in full_str:
+        # Clean up the string (remove leading / and 'weather' prefix if present)
+        clean_str = full_str.lstrip("/").replace("weather", "", 1).lstrip("&").lstrip("?")
+        
+        # Parse into dictionary
+        params = urllib.parse.parse_qs(clean_str)
         data = {k: v[0] for k, v in params.items()}
         
         if data:
-            new_record = models.WeatherRecord(raw_data=data)
-            db.add(new_record)
-            db.commit()
-            print(f"Captured weather data from weird path: {data.get('dateutc', 'unknown time')}")
-            return {"status": "success"}
+            # Save to DB manually since we are in middleware
+            db = Session(bind=engine)
+            try:
+                new_record = models.WeatherRecord(raw_data=data)
+                db.add(new_record)
+                db.commit()
+                print(f"Middleware Captured weather: {data.get('dateutc', 'unknown')}")
+            finally:
+                db.close()
+            
+            # Return success to the station immediately
+            return Response(content='{"status":"success"}', media_type="application/json")
 
-    return {"status": "ignored", "path": path}
+    return await call_next(request)
+
+# --- STANDARD ROUTES ---
+
+@app.get("/health")
+def health():
+    return {"status": "ok"}
 
 class IngestPayload(BaseModel):
     allsky_path: str
@@ -72,6 +84,7 @@ class IngestPayload(BaseModel):
 @app.post("/ingest")
 def ingest_data(payload: IngestPayload, db: Session = Depends(get_db)):
     now = datetime.utcnow()
+    # Nearest neighbor sync
     closest_weather = db.query(models.WeatherRecord)\
         .order_by(func.abs(func.extract('epoch', models.WeatherRecord.timestamp) - func.extract('epoch', now)))\
         .first()
@@ -87,8 +100,5 @@ def ingest_data(payload: IngestPayload, db: Session = Depends(get_db)):
     db.add(db_capture)
     db.commit()
     db.refresh(db_capture)
-    return {"status": "success", "id": db_capture.id}
+    return {"status": "success", "id": db_capture.id, "synced_weather_id": db_capture.weather_record_id}
 
-@app.get("/health")
-def health():
-    return {"status": "ok"}
