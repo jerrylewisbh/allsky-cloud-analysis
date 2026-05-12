@@ -1,10 +1,11 @@
-from fastapi import FastAPI, Depends, Request, HTTPException
+from fastapi import FastAPI, Depends, Request
 from sqlalchemy.orm import Session
 from sqlalchemy import create_engine, func
 from . import models
 from pydantic import BaseModel
 from typing import List, Optional, Dict
 import os
+import time
 from datetime import datetime
 
 app = FastAPI(title="Allsky Cloud Analysis API")
@@ -15,8 +16,18 @@ POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "allsky")
 POSTGRES_DB = os.getenv("POSTGRES_DB", "cloud_analysis")
 SQLALCHEMY_DATABASE_URL = f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@db:5432/{POSTGRES_DB}"
 
+# Robust database initialization with retries
 engine = create_engine(SQLALCHEMY_DATABASE_URL)
-models.Base.metadata.create_all(bind=engine)
+
+connected = False
+while not connected:
+    try:
+        models.Base.metadata.create_all(bind=engine)
+        connected = True
+        print("Successfully connected to the database and verified tables.")
+    except Exception as e:
+        print(f"Database not ready yet... retrying in 2 seconds.")
+        time.sleep(2)
 
 def get_db():
     db = Session(bind=engine)
@@ -25,8 +36,6 @@ def get_db():
     finally:
         db.close()
 
-# --- WEATHER STATION ENDPOINT ---
-# Most Ambient stations use GET for custom server uploads
 @app.get("/weather")
 async def receive_weather(request: Request, db: Session = Depends(get_db)):
     data = dict(request.query_params)
@@ -38,7 +47,6 @@ async def receive_weather(request: Request, db: Session = Depends(get_db)):
     db.commit()
     return {"status": "success"}
 
-# --- ALLSKY INGESTION ENDPOINT ---
 class IngestPayload(BaseModel):
     allsky_path: str
     thermal_path: str
@@ -47,14 +55,11 @@ class IngestPayload(BaseModel):
 
 @app.post("/ingest")
 def ingest_data(payload: IngestPayload, db: Session = Depends(get_db)):
-    # 1. Find the closest weather record (nearest neighbor in time)
-    # This queries for the weather record with the smallest timestamp difference to 'now'
     now = datetime.utcnow()
     closest_weather = db.query(models.WeatherRecord)\
         .order_by(func.abs(func.extract('epoch', models.WeatherRecord.timestamp) - func.extract('epoch', now)))\
         .first()
 
-    # 2. Create the capture record
     db_capture = models.Capture(
         allsky_path=payload.allsky_path,
         thermal_path=payload.thermal_path,
