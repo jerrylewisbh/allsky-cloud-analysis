@@ -60,37 +60,74 @@ def send_to_cwop(raw_data, cwop_id, lat, lon, source="ESP32"):
         lon_str = f"{lon_deg:03d}{lon_min:05.2f}{'E' if lon >= 0 else 'W'}"
 
         # 3. Extract & Convert Values
-        # Handle different key names between ESP32 and Ambient Weather
         temp_f_raw = raw_data.get('tempf')
         if temp_f_raw is None:
             temp_c = raw_data.get('temp')
             temp_f = int(round(temp_c * 1.8 + 32)) if temp_c is not None else None
         else:
-            temp_f = int(float(temp_f_raw))
+            temp_f = int(round(float(temp_f_raw)))
 
         hum_raw = raw_data.get('humidity', raw_data.get('hum'))
-        hum_val = int(float(hum_raw)) if hum_raw is not None else None
+        hum_val = int(round(float(hum_raw))) if hum_raw is not None else None
         
-        # Barometer: convert to tenths of millibars
-        pres_hpa = raw_data.get('pres') # ESP32 format
+        pres_hpa = raw_data.get('pres')
         if pres_hpa is not None:
             barom_mb_tenths = int(round(pres_hpa * 10))
         else:
-            # Ambient format (inches Hg)
             barom_in = raw_data.get('baromrelin')
-            barom_mb_tenths = int(float(barom_in) * 338.639) if barom_in is not None else None
+            barom_mb_tenths = int(round(float(barom_in) * 33.8639 * 10)) if barom_in is not None else None
 
-        # Wind
-        wdir = int(float(raw_data.get('winddir', 0)))
+        # Wind & Rain parameters
+        wdir = int(round(float(raw_data.get('winddir', 0))))
         wind_kmh = raw_data.get('wind')
+        
         if wind_kmh is not None:
             wspd_mph = int(round(wind_kmh * 0.621371))
+            wgst_mph = "..." # ESP32 has no gust memory
         else:
-            wspd_mph = int(float(raw_data.get('windspeedmph', 0)))
+            wspd_mph = int(round(float(raw_data.get('windspeedmph', 0))))
+            # Wind Gust (mph)
+            wgst_val = raw_data.get('windgustmph')
+            wgst_mph = f"{int(round(float(wgst_val))):03d}" if wgst_val is not None else "..."
+        
+        # Rain: CWOP expects hundredths of an inch (0.15 inches = 15)
+        # r = rain last hour, p = rain last 24h, P = rain since midnight
+        rain_1h_in = raw_data.get('hourlyrainin')
+        r_1h = f"{int(round(float(rain_1h_in) * 100)):03d}" if rain_1h_in is not None else "..."
+        
+        rain_24h_in = raw_data.get('dailyrainin')
+        p_24h = f"{int(round(float(rain_24h_in) * 100)):03d}" if rain_24h_in is not None else "..."
+        
+        # Ambient doesn't explicitly send "since midnight" separately from daily usually,
+        # but we can populate P with daily if it resets at midnight.
+        P_mid = p_24h
+
+        # Solar Radiation (Luminosity) - CWOP 'L' or 'l'
+        # Format for L: L followed by 3 digits for Watts/m2. If > 999, use 'l' and add 1000.
+        solar_rad = raw_data.get('solarradiation')
+        solar_str = ""
+        if solar_rad is not None:
+            solar_w = int(round(float(solar_rad)))
+            if solar_w <= 999:
+                solar_str = f"L{solar_w:03d}"
+            else:
+                solar_str = f"l{(solar_w - 1000):03d}"
+        else:
+            # Try to convert TSL2591 lux to W/m2 approximation (lux / 120 is a rough daylight estimate)
+            lux = raw_data.get('lux')
+            if lux is not None:
+                solar_w = int(round(float(lux) / 120))
+                if solar_w <= 999:
+                    solar_str = f"L{solar_w:03d}"
+                else:
+                    solar_str = f"l{(solar_w - 1000):03d}"
         
         if temp_f is None or barom_mb_tenths is None:
             print(f"  CWOP Skip: Missing Temp ({temp_f}) or Baro ({barom_mb_tenths})")
             return
+
+        # Temperature string (handles negative)
+        temp_str = f"t{temp_f:03d}" if temp_f >= 0 else f"t-{abs(temp_f):02d}"
 
         # Humidity string (00 = 100%)
         hum_str = ".."
@@ -98,15 +135,14 @@ def send_to_cwop(raw_data, cwop_id, lat, lon, source="ESP32"):
             hum_str = "00" if hum_val >= 100 else f"{hum_val:02d}"
 
         # 4. Construct the APRS String
-        # We use 'c' for wind direction if available
-        wx_payload = f"{time_str}{lat_str}/{lon_str}_c{wdir:03d}s{wspd_mph:03d}g...t{temp_f:03d}r...p...P...h{hum_str}b{barom_mb_tenths:05d}"
+        wx_payload = f"{time_str}{lat_str}/{lon_str}_c{wdir:03d}s{wspd_mph:03d}g{wgst_mph}{temp_str}r{r_1h}p{p_24h}P{P_mid}h{hum_str}b{barom_mb_tenths:05d}{solar_str}"
         packet = f"{cwop_id}>APRS,TCPIP*:@{wx_payload}AllskyBridge\r\n"
 
         # 5. Send via TCP to CWOP Servers
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(5)
             s.connect(("cwop.aprs.net", 14580))
-            s.sendall(f"user {cwop_id} pass -1 vers AllskyCloud 1.2\r\n".encode('utf-8'))
+            s.sendall(f"user {cwop_id} pass -1 vers AllskyCloud 1.3\r\n".encode('utf-8'))
             s.sendall(packet.encode('utf-8'))
             print(f"  CWOP Success: {packet.strip()}")
             
@@ -154,7 +190,6 @@ def calculate_ephemeris(dt):
             "moon_alt": float(math.degrees(moon.alt)),
             "moon_phase": float(moon.moon_phase * 100)
         }
-        print(f"EPH: Sun {results['sun_alt']:.1f}, Moon {results['moon_alt']:.1f}, Phase {results['moon_phase']:.1f}")
         return results
     except Exception as e:
         print(f"EPH ERROR: {e}")
@@ -175,7 +210,6 @@ async def ambient_weather_interceptor(request: Request, call_next):
                 new_record = models.WeatherRecord(raw_data=data)
                 db.add(new_record)
                 db.commit()
-                # NEW: Also push Ambient Weather data to CWOP
                 if CWOP_ID:
                     send_to_cwop(data, CWOP_ID, LAT, LON, source="AmbientWeather")
                 return Response(content='{"status":"success"}', media_type="application/json")
@@ -226,7 +260,6 @@ def ingest_data(payload: IngestPayload, db: Session = Depends(get_db)):
     if LPM_API_KEY:
         send_to_lpm(payload.esp32_sensors, LPM_API_KEY)
         
-    print(f"INGEST SUCCESS: id {db_capture.id}, synced weather {db_capture.weather_record_id}")
     return {"status": "success", "id": db_capture.id}
 
 @app.get("/sqm")
