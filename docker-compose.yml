@@ -5,7 +5,7 @@ services:
     env_file:
       - .env
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - allsky_db_permanent:/var/lib/postgresql/data
     ports:
       - "5432:5432"
 
@@ -27,11 +27,13 @@ services:
     ports:
       - "3000:3000"
     volumes:
-      - grafana_data:/var/lib/grafana
+      - allsky_grafana_permanent:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning
     depends_on:
       - db
 
 volumes:
-  postgres_data:
-  grafana_data:
+  allsky_db_permanent:
+    name: allsky_db_permanent
+  allsky_grafana_permanent:
+    name: allsky_grafana_permanent
