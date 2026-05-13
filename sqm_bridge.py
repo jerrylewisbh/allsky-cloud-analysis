@@ -21,7 +21,6 @@ def handle_client(client, addr):
     client.settimeout(2.0)
     try:
         while True:
-            # Command could be 'rx', 'ix', or 'cx'
             data = client.recv(1024).decode('utf-8').strip()
             if not data:
                 break
@@ -33,25 +32,19 @@ def handle_client(client, addr):
                 mpsas = sensors.get("sky_brightness_mpsas") if sensors else None
                 temp = sensors.get("temp") if sensors else None
                 
-                # Hardcoded defaults as requested
                 if mpsas is None: mpsas = 18.0
                 if temp is None: temp = 20.0
                 
-                # EXACT UNIhedron SQM-LE Formatting:
-                # r, 21.20m,0000000034Hz,0000000000c,0000000.000s, 018.5C
-                # Notice: No space after 1st, 2nd, 3rd, 4th commas. Space before Temp.
-                resp = f"r, {mpsas:5.2f}m,0000000000Hz,0000000000c,0000000.000s, {temp:05.1f}C\r\n"
+                resp = f"r, {mpsas:05.2f}m,0000000000Hz,0000000000c,0000000.000s, {temp:05.1f}C\r\n"
                 client.send(resp.encode('utf-8'))
                 print(f"  Sent: {resp.strip()}")
                 
             elif "ix" in data:
-                # i,protocol,model,feature,firmware
                 resp = "i,00000002,00000003,00000001,00000022\r\n"
                 client.send(resp.encode('utf-8'))
                 print(f"  Sent: {resp.strip()}")
                 
             elif "cx" in data:
-                # c,offset,train,test
                 resp = "c,00000015.31,00000000.00,00000000.00\r\n"
                 client.send(resp.encode('utf-8'))
                 print(f"  Sent: {resp.strip()}")
