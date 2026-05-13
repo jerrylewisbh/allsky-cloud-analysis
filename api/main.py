@@ -39,10 +39,13 @@ while not connected:
         time.sleep(2)
 
 
-def send_to_cwop(sensors, cwop_id, lat, lon):
-    """Sends ESP32 sensor data to CWOP/findu.com"""
+def send_to_cwop(raw_data, cwop_id, lat, lon, source="ESP32"):
+    """Sends sensor data to CWOP/findu.com"""
     try:
-        if not cwop_id: return
+        if not cwop_id:
+            return
+
+        print(f"[{datetime.now()}] Attempting CWOP push from {source}...")
 
         # 1. Format Time: DDHHMMz (UTC)
         time_str = datetime.now(timezone.utc).strftime("%d%H%Mz")
@@ -56,42 +59,59 @@ def send_to_cwop(sensors, cwop_id, lat, lon):
         lon_min = (abs(lon) - lon_deg) * 60
         lon_str = f"{lon_deg:03d}{lon_min:05.2f}{'E' if lon >= 0 else 'W'}"
 
-        # 3. Extract & Convert Values (ESP32 is C, km/h, hPa)
-        temp_c = sensors.get('temp')
-        pres_hpa = sensors.get('pres')
-        hum = sensors.get('humidity', sensors.get('hum'))
-        wind_kmh = sensors.get('wind')
+        # 3. Extract & Convert Values
+        # Handle different key names between ESP32 and Ambient Weather
+        temp_f_raw = raw_data.get('tempf')
+        if temp_f_raw is None:
+            temp_c = raw_data.get('temp')
+            temp_f = int(round(temp_c * 1.8 + 32)) if temp_c is not None else None
+        else:
+            temp_f = int(float(temp_f_raw))
 
-        if temp_c is None or pres_hpa is None:
+        hum_raw = raw_data.get('humidity', raw_data.get('hum'))
+        hum_val = int(float(hum_raw)) if hum_raw is not None else None
+        
+        # Barometer: convert to tenths of millibars
+        pres_hpa = raw_data.get('pres') # ESP32 format
+        if pres_hpa is not None:
+            barom_mb_tenths = int(round(pres_hpa * 10))
+        else:
+            # Ambient format (inches Hg)
+            barom_in = raw_data.get('baromrelin')
+            barom_mb_tenths = int(float(barom_in) * 338.639) if barom_in is not None else None
+
+        # Wind
+        wdir = int(float(raw_data.get('winddir', 0)))
+        wind_kmh = raw_data.get('wind')
+        if wind_kmh is not None:
+            wspd_mph = int(round(wind_kmh * 0.621371))
+        else:
+            wspd_mph = int(float(raw_data.get('windspeedmph', 0)))
+        
+        if temp_f is None or barom_mb_tenths is None:
+            print(f"  CWOP Skip: Missing Temp ({temp_f}) or Baro ({barom_mb_tenths})")
             return
 
-        # Temperature: Fahrenheit
-        temp_f = int(round(temp_c * 1.8 + 32))
-        
-        # Wind: MPH (No direction available on this ESP32)
-        wind_mph = int(round(wind_kmh * 0.621371)) if wind_kmh is not None else 0
-        
-        # Barometer: hPa to tenths of millibars (1 hPa = 1 mb)
-        barom_mb_tenths = int(round(pres_hpa * 10))
-
-        # Humidity (00 = 100%)
-        hum_val = int(float(hum or 0))
-        hum_str = "00" if hum_val >= 100 else f"{hum_val:02d}"
+        # Humidity string (00 = 100%)
+        hum_str = ".."
+        if hum_val is not None:
+            hum_str = "00" if hum_val >= 100 else f"{hum_val:02d}"
 
         # 4. Construct the APRS String
-        wx_payload = f"{time_str}{lat_str}/{lon_str}_...s{wind_mph:03d}g...t{temp_f:03d}r...p...P...h{hum_str}b{barom_mb_tenths:05d}"
-        packet = f"{cwop_id}>APRS,TCPIP*:@{wx_payload}ESP32\r\n"
+        # We use 'c' for wind direction if available
+        wx_payload = f"{time_str}{lat_str}/{lon_str}_c{wdir:03d}s{wspd_mph:03d}g...t{temp_f:03d}r...p...P...h{hum_str}b{barom_mb_tenths:05d}"
+        packet = f"{cwop_id}>APRS,TCPIP*:@{wx_payload}AllskyBridge\r\n"
 
         # 5. Send via TCP to CWOP Servers
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(5)
             s.connect(("cwop.aprs.net", 14580))
-            s.sendall(f"user {cwop_id} pass -1 vers AllskyCloud 1.1\r\n".encode('utf-8'))
+            s.sendall(f"user {cwop_id} pass -1 vers AllskyCloud 1.2\r\n".encode('utf-8'))
             s.sendall(packet.encode('utf-8'))
-            print(f"CWOP Update Sent: {packet.strip()}")
+            print(f"  CWOP Success: {packet.strip()}")
             
     except Exception as e:
-        print(f"CWOP Error: {e}")
+        print(f"  CWOP Error: {e}")
 
 def send_to_lpm(sensors, lpm_key):
     """Sends SQM data to LightPollutionMap.info"""
@@ -108,7 +128,7 @@ def send_to_lpm(sensors, lpm_key):
             'dt': datetime.now().strftime('%Y-%m-%d %H:%M:%00')
         }
         r = requests.post(url, data=data, timeout=10)
-        print(f"LPM Update Sent ({mpsas:.2f}): {r.text.strip()}")
+        print(f"[{datetime.now()}] LPM Success ({mpsas:.2f}): {r.text.strip()}")
     except Exception as e:
         print(f"LPM Error: {e}")
 
@@ -155,9 +175,12 @@ async def ambient_weather_interceptor(request: Request, call_next):
                 new_record = models.WeatherRecord(raw_data=data)
                 db.add(new_record)
                 db.commit()
+                # NEW: Also push Ambient Weather data to CWOP
+                if CWOP_ID:
+                    send_to_cwop(data, CWOP_ID, LAT, LON, source="AmbientWeather")
                 return Response(content='{"status":"success"}', media_type="application/json")
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Interceptor Error: {e}")
             finally:
                 db.close()
     return await call_next(request)
@@ -197,9 +220,9 @@ def ingest_data(payload: IngestPayload, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(db_capture)
     
-    # Trigger External Updates
+    # Trigger External Updates (from ESP32)
     if CWOP_ID:
-        send_to_cwop(payload.esp32_sensors, CWOP_ID, LAT, LON)
+        send_to_cwop(payload.esp32_sensors, CWOP_ID, LAT, LON, source="ESP32")
     if LPM_API_KEY:
         send_to_lpm(payload.esp32_sensors, LPM_API_KEY)
         
