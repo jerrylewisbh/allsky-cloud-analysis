@@ -6,7 +6,8 @@ from pydantic import BaseModel
 from typing import List, Optional, Dict
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
+import socket
 import urllib.parse
 import ephem
 import math
@@ -21,6 +22,7 @@ SQLALCHEMY_DATABASE_URL = f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@db:
 
 LAT = os.getenv("LOCATION_LATITUDE", "33.0")
 LON = os.getenv("LOCATION_LONGITUDE", "-84.0")
+CWOP_ID = os.getenv("CWOP_ID", "")
 
 engine = create_engine(SQLALCHEMY_DATABASE_URL)
 
@@ -33,6 +35,53 @@ while not connected:
     except Exception as e:
         print(f"Waiting for DB... {e}")
         time.sleep(2)
+
+
+def send_to_cwop(raw_data, cwop_id, lat, lon):
+    try:
+        # 1. Format Time: DDHHMMz (UTC)
+        time_str = datetime.now(timezone.utc).strftime("%d%H%Mz")
+
+        # 2. Format Coordinates: DDMM.hhN / DDDMM.hhW
+        lat_deg = int(abs(lat))
+        lat_min = (abs(lat) - lat_deg) * 60
+        lat_str = f"{lat_deg:02d}{lat_min:05.2f}{'N' if lat >= 0 else 'S'}"
+
+        lon_deg = int(abs(lon))
+        lon_min = (abs(lon) - lon_deg) * 60
+        lon_str = f"{lon_deg:03d}{lon_min:05.2f}{'E' if lon >= 0 else 'W'}"
+
+        # 3. Extract & Format Weather Values
+        wdir = int(float(raw_data.get('winddir', 0)))
+        wspd = int(float(raw_data.get('windspeedmph', 0)))
+        wgst = int(float(raw_data.get('windgustmph', 0)))
+        temp = int(float(raw_data.get('tempf', 0)))
+        
+        # Rainfall (hundredths of an inch)
+        r_1h = int(float(raw_data.get('hourlyrainin', 0)) * 100)
+        p_24h = int(float(raw_data.get('dailyrainin', 0)) * 100)
+        
+        # Barometer: inches Hg to tenths of millibars
+        barom_mb_tenths = int(float(raw_data.get('baromrelin', 0)) * 338.639)
+
+        # Humidity (00 = 100%)
+        hum = int(float(raw_data.get('humidity', 0)))
+        hum_str = "00" if hum == 100 else f"{hum:02d}"
+
+        # 4. Construct the APRS String
+        wx_payload = f"{time_str}{lat_str}/{lon_str}_c{wdir:03d}s{wspd:03d}g{wgst:03d}t{temp:03d}r{r_1h:03d}p{p_24h:03d}P{p_24h:03d}b{barom_mb_tenths:05d}h{hum_str}"
+        packet = f"{cwop_id}>APRS,TCPXX*:@{wx_payload}Allsky Cloud Analysis\r\n"
+
+        # 5. Send via TCP to CWOP Servers
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.settimeout(3)
+            s.connect(("cwop.aprs.net", 14580))
+            s.sendall(f"user {cwop_id} pass -1 vers AllskyCloud 1.0\r\n".encode('utf-8'))
+            s.sendall(packet.encode('utf-8'))
+            print(f"CWOP Update Sent: {packet.strip()}")
+            
+    except Exception as e:
+        print(f"CWOP Error: {e}")
 
 def get_db():
     db = Session(bind=engine)
@@ -77,6 +126,8 @@ async def ambient_weather_interceptor(request: Request, call_next):
                 new_record = models.WeatherRecord(raw_data=data)
                 db.add(new_record)
                 db.commit()
+                if CWOP_ID:
+                    send_to_cwop(data, CWOP_ID, float(LAT), float(LON))
                 return Response(content='{"status":"success"}', media_type="application/json")
             except Exception:
                 pass
@@ -120,6 +171,17 @@ def ingest_data(payload: IngestPayload, db: Session = Depends(get_db)):
     db.refresh(db_capture)
     print(f"INGEST SUCCESS: id {db_capture.id}, synced weather {db_capture.weather_record_id}")
     return {"status": "success", "id": db_capture.id}
+
+@app.get("/latest")
+def get_latest(db: Session = Depends(get_db)):
+    latest_capture = db.query(models.Capture).order_by(models.Capture.timestamp.desc()).first()
+    latest_weather = db.query(models.WeatherRecord).order_by(models.WeatherRecord.timestamp.desc()).first()
+    
+    return {
+        "capture": latest_capture,
+        "weather": latest_weather.raw_data if latest_weather else None,
+        "timestamp": latest_capture.timestamp if latest_capture else None
+    }
 
 @app.get("/health")
 def health():
