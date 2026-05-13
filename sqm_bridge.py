@@ -9,8 +9,6 @@ LISTEN_PORT = 10001
 
 def get_esp_data():
     try:
-        # Some ESPHome setups use .local, others use IP. 
-        # Adding a short timeout to keep the bridge responsive.
         response = requests.get(f"http://{ESP32_IP}/json", timeout=1.5)
         if response.status_code == 200:
             return response.json().get("sensors", {})
@@ -31,34 +29,39 @@ def handle_client(client, addr):
             
             if "rx" in data:
                 sensors = get_esp_data()
-                # Default to 0.0 if sensors are offline
-                mpsas = sensors.get("sky_brightness_mpsas", 0.0) if sensors else 0.0
-                temp = sensors.get("temp", 0.0) if sensors else 0.0
                 
-                if mpsas is None: mpsas = 0.0
-                if temp is None: temp = 0.0
+                # Fetch data, but provide hardcoded defaults if missing or null
+                if sensors:
+                    mpsas = sensors.get("sky_brightness_mpsas")
+                    temp = sensors.get("temp")
+                else:
+                    mpsas = None
+                    temp = None
+                
+                # Hardcoded defaults as requested
+                if mpsas is None: 
+                    mpsas = 18.0
+                if temp is None: 
+                    temp = 20.0
                 
                 # Format: r, 21.20m, 0000000034Hz, 0000000000c, 0000000.000s, 018.5C
-                # Note the exact spacing: r, [space] value [m]
-                resp = f"r, {mpsas:5.2f}m, 0000000000Hz, 0000000000c, 0000000.000s, {temp:05.1f}C\r\n"
+                # Using %05.2f ensures it looks like "18.00" instead of "18.0" 
+                # and pad the temperature to exactly match "018.5C" or "020.0C"
+                resp = f"r, {mpsas:05.2f}m, 0000000000Hz, 0000000000c, 0000000.000s, {temp:05.1f}C\r\n"
                 client.send(resp.encode('utf-8'))
                 print(f"  Response: {resp.strip()}")
                 
             elif "ix" in data:
-                # Format: i,protocol,model,feature,firmware
-                # No spaces after first comma is common in newer firmwares
                 resp = "i,00000002,00000003,00000001,00000022\r\n"
                 client.send(resp.encode('utf-8'))
                 print(f"  Response: {resp.strip()}")
                 
             elif "cx" in data:
-                # Format: c,offset,train,test
                 resp = "c,00000015.31,00000000.00,00000000.00\r\n"
                 client.send(resp.encode('utf-8'))
                 print(f"  Response: {resp.strip()}")
             
             else:
-                # Catch-all for unexpected commands
                 pass
                 
     except Exception as e:
@@ -73,6 +76,7 @@ def run_emulator():
     server.listen(5)
     print(f"SQM-LE Emulator listening on port {LISTEN_PORT}...")
     print(f"Targeting ESP32 at: http://{ESP32_IP}/json")
+    print(f"Defaulting to 18.00 mpsas and 20.0C if sensor is null")
 
     while True:
         client, addr = server.accept()
