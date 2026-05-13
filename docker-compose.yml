@@ -23,6 +23,8 @@ services:
       # SET YOUR LOCATION HERE
       LOCATION_LATITUDE: "33.0"
       LOCATION_LONGITUDE: "-84.0"
+      # CWOP / APRS Reporting
+      CWOP_ID: "" # Add your CWOP ID here once received
     ports:
       - "8000:8000"
     depends_on:
