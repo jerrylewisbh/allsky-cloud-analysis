@@ -2,10 +2,8 @@ services:
   db:
     image: postgres:15-alpine
     restart: unless-stopped
-    environment:
-      POSTGRES_USER: allsky
-      POSTGRES_PASSWORD: allsky
-      POSTGRES_DB: cloud_analysis
+    env_file:
+      - .env
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
@@ -16,15 +14,8 @@ services:
       context: .
       dockerfile: api/Dockerfile
     restart: unless-stopped
-    environment:
-      POSTGRES_USER: allsky
-      POSTGRES_PASSWORD: allsky
-      POSTGRES_DB: cloud_analysis
-      # SET YOUR LOCATION HERE
-      LOCATION_LATITUDE: "33.0"
-      LOCATION_LONGITUDE: "-84.0"
-      # CWOP / APRS Reporting
-      CWOP_ID: "" # Add your CWOP ID here once received
+    env_file:
+      - .env
     ports:
       - "8000:8000"
     depends_on:

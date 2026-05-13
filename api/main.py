@@ -11,6 +11,7 @@ import socket
 import urllib.parse
 import ephem
 import math
+import requests
 
 app = FastAPI(title="Allsky Cloud Analysis API")
 
@@ -20,9 +21,10 @@ POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "allsky")
 POSTGRES_DB = os.getenv("POSTGRES_DB", "cloud_analysis")
 SQLALCHEMY_DATABASE_URL = f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@db:5432/{POSTGRES_DB}"
 
-LAT = os.getenv("LOCATION_LATITUDE", "33.0")
-LON = os.getenv("LOCATION_LONGITUDE", "-84.0")
+LAT = float(os.getenv("LOCATION_LATITUDE", "51.05"))
+LON = float(os.getenv("LOCATION_LONGITUDE", "-114.07"))
 CWOP_ID = os.getenv("CWOP_ID", "")
+LPM_API_KEY = os.getenv("LPM_API_KEY", "")
 
 engine = create_engine(SQLALCHEMY_DATABASE_URL)
 
@@ -37,8 +39,11 @@ while not connected:
         time.sleep(2)
 
 
-def send_to_cwop(raw_data, cwop_id, lat, lon):
+def send_to_cwop(sensors, cwop_id, lat, lon):
+    """Sends ESP32 sensor data to CWOP/findu.com"""
     try:
+        if not cwop_id: return
+
         # 1. Format Time: DDHHMMz (UTC)
         time_str = datetime.now(timezone.utc).strftime("%d%H%Mz")
 
@@ -51,37 +56,61 @@ def send_to_cwop(raw_data, cwop_id, lat, lon):
         lon_min = (abs(lon) - lon_deg) * 60
         lon_str = f"{lon_deg:03d}{lon_min:05.2f}{'E' if lon >= 0 else 'W'}"
 
-        # 3. Extract & Format Weather Values
-        wdir = int(float(raw_data.get('winddir', 0)))
-        wspd = int(float(raw_data.get('windspeedmph', 0)))
-        wgst = int(float(raw_data.get('windgustmph', 0)))
-        temp = int(float(raw_data.get('tempf', 0)))
+        # 3. Extract & Convert Values (ESP32 is C, km/h, hPa)
+        temp_c = sensors.get('temp')
+        pres_hpa = sensors.get('pres')
+        hum = sensors.get('humidity', sensors.get('hum'))
+        wind_kmh = sensors.get('wind')
+
+        if temp_c is None or pres_hpa is None:
+            return
+
+        # Temperature: Fahrenheit
+        temp_f = int(round(temp_c * 1.8 + 32))
         
-        # Rainfall (hundredths of an inch)
-        r_1h = int(float(raw_data.get('hourlyrainin', 0)) * 100)
-        p_24h = int(float(raw_data.get('dailyrainin', 0)) * 100)
+        # Wind: MPH (No direction available on this ESP32)
+        wind_mph = int(round(wind_kmh * 0.621371)) if wind_kmh is not None else 0
         
-        # Barometer: inches Hg to tenths of millibars
-        barom_mb_tenths = int(float(raw_data.get('baromrelin', 0)) * 338.639)
+        # Barometer: hPa to tenths of millibars (1 hPa = 1 mb)
+        barom_mb_tenths = int(round(pres_hpa * 10))
 
         # Humidity (00 = 100%)
-        hum = int(float(raw_data.get('humidity', 0)))
-        hum_str = "00" if hum == 100 else f"{hum:02d}"
+        hum_val = int(float(hum or 0))
+        hum_str = "00" if hum_val >= 100 else f"{hum_val:02d}"
 
         # 4. Construct the APRS String
-        wx_payload = f"{time_str}{lat_str}/{lon_str}_c{wdir:03d}s{wspd:03d}g{wgst:03d}t{temp:03d}r{r_1h:03d}p{p_24h:03d}P{p_24h:03d}b{barom_mb_tenths:05d}h{hum_str}"
-        packet = f"{cwop_id}>APRS,TCPXX*:@{wx_payload}Allsky Cloud Analysis\r\n"
+        wx_payload = f"{time_str}{lat_str}/{lon_str}_...s{wind_mph:03d}g...t{temp_f:03d}r...p...P...h{hum_str}b{barom_mb_tenths:05d}"
+        packet = f"{cwop_id}>APRS,TCPIP*:@{wx_payload}ESP32\r\n"
 
         # 5. Send via TCP to CWOP Servers
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(3)
+            s.settimeout(5)
             s.connect(("cwop.aprs.net", 14580))
-            s.sendall(f"user {cwop_id} pass -1 vers AllskyCloud 1.0\r\n".encode('utf-8'))
+            s.sendall(f"user {cwop_id} pass -1 vers AllskyCloud 1.1\r\n".encode('utf-8'))
             s.sendall(packet.encode('utf-8'))
             print(f"CWOP Update Sent: {packet.strip()}")
             
     except Exception as e:
         print(f"CWOP Error: {e}")
+
+def send_to_lpm(sensors, lpm_key):
+    """Sends SQM data to LightPollutionMap.info"""
+    try:
+        if not lpm_key: return
+        mpsas = sensors.get("sky_brightness_mpsas")
+        if mpsas is None or mpsas < 15.0:
+            return
+
+        url = "https://www.lightpollutionmap.info/sqm/submit_sqm.php"
+        data = {
+            'key': lpm_key,
+            'sqm': f"{mpsas:.2f}",
+            'dt': datetime.now().strftime('%Y-%m-%d %H:%M:%00')
+        }
+        r = requests.post(url, data=data, timeout=10)
+        print(f"LPM Update Sent ({mpsas:.2f}): {r.text.strip()}")
+    except Exception as e:
+        print(f"LPM Error: {e}")
 
 def get_db():
     db = Session(bind=engine)
@@ -126,8 +155,6 @@ async def ambient_weather_interceptor(request: Request, call_next):
                 new_record = models.WeatherRecord(raw_data=data)
                 db.add(new_record)
                 db.commit()
-                if CWOP_ID:
-                    send_to_cwop(data, CWOP_ID, float(LAT), float(LON))
                 return Response(content='{"status":"success"}', media_type="application/json")
             except Exception:
                 pass
@@ -169,22 +196,26 @@ def ingest_data(payload: IngestPayload, db: Session = Depends(get_db)):
     db.add(db_capture)
     db.commit()
     db.refresh(db_capture)
+    
+    # Trigger External Updates
+    if CWOP_ID:
+        send_to_cwop(payload.esp32_sensors, CWOP_ID, LAT, LON)
+    if LPM_API_KEY:
+        send_to_lpm(payload.esp32_sensors, LPM_API_KEY)
+        
     print(f"INGEST SUCCESS: id {db_capture.id}, synced weather {db_capture.weather_record_id}")
     return {"status": "success", "id": db_capture.id}
 
 @app.get("/sqm")
 def get_sqm_unihedron(db: Session = Depends(get_db)):
-    """Mimics a Unihedron SQM-LE 'rx' response for 3rd party networks."""
+    """Mimics a Unihedron SQM-LE 'rx' response."""
     latest = db.query(models.Capture).filter(models.Capture.esp32_sensors['sky_brightness_mpsas'].astext != None).order_by(models.Capture.timestamp.desc()).first()
     if not latest:
-        return Response(content="r, 00.00m, 000000000000, 000000000000, 000000000000, 000.0\r\n", media_type="text/plain")
+        return Response(content="r, 00.00m,0000000000Hz,0000000000c,0000000.000s, 000.0C\r\n", media_type="text/plain")
     
     sqm = latest.esp32_sensors.get("sky_brightness_mpsas", 0.0)
     temp = latest.esp32_sensors.get("temp", 0.0)
-    
-    # Format: r, <mpsas>m, <id...>, <id...>, <id...>, <temp>
-    # This is the exact format Unihedron SQM-LE uses for the 'rx' command
-    response = f"r, {sqm:05.2f}m, 000000000000, 000000000000, 000000000000, {temp:05.1f}\r\n"
+    response = f"r, {sqm:05.2f}m,0000000000Hz,0000000000c,0000000.000s, {temp:05.1f}C\r\n"
     return Response(content=response, media_type="text/plain")
 
 @app.get("/latest")
