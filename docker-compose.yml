@@ -5,7 +5,7 @@ services:
     env_file:
       - .env
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - server_postgres_data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
 
@@ -33,5 +33,6 @@ services:
       - db
 
 volumes:
-  postgres_data:
+  server_postgres_data:
+    external: true
   grafana_data:
