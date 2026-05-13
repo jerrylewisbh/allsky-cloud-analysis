@@ -172,6 +172,21 @@ def ingest_data(payload: IngestPayload, db: Session = Depends(get_db)):
     print(f"INGEST SUCCESS: id {db_capture.id}, synced weather {db_capture.weather_record_id}")
     return {"status": "success", "id": db_capture.id}
 
+@app.get("/sqm")
+def get_sqm_unihedron(db: Session = Depends(get_db)):
+    """Mimics a Unihedron SQM-LE 'rx' response for 3rd party networks."""
+    latest = db.query(models.Capture).filter(models.Capture.esp32_sensors['sky_brightness_mpsas'].astext != None).order_by(models.Capture.timestamp.desc()).first()
+    if not latest:
+        return Response(content="r, 00.00m, 000000000000, 000000000000, 000000000000, 000.0\r\n", media_type="text/plain")
+    
+    sqm = latest.esp32_sensors.get("sky_brightness_mpsas", 0.0)
+    temp = latest.esp32_sensors.get("temp", 0.0)
+    
+    # Format: r, <mpsas>m, <id...>, <id...>, <id...>, <temp>
+    # This is the exact format Unihedron SQM-LE uses for the 'rx' command
+    response = f"r, {sqm:05.2f}m, 000000000000, 000000000000, 000000000000, {temp:05.1f}\r\n"
+    return Response(content=response, media_type="text/plain")
+
 @app.get("/latest")
 def get_latest(db: Session = Depends(get_db)):
     latest_capture = db.query(models.Capture).order_by(models.Capture.timestamp.desc()).first()
