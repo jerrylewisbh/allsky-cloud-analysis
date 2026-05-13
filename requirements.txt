@@ -1,3 +1,9 @@
+fastapi
+uvicorn
+sqlalchemy
+psycopg2-binary
+pydantic
+ephem
+requests
 opencv-python
 numpy
-requests
