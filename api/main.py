@@ -28,6 +28,9 @@ LPM_API_KEY = os.getenv("LPM_API_KEY", "")
 
 engine = create_engine(SQLALCHEMY_DATABASE_URL)
 
+# Rate limiter state
+last_cwop_push_time = 0
+
 connected = False
 while not connected:
     try:
@@ -40,10 +43,15 @@ while not connected:
 
 
 def send_to_cwop(raw_data, cwop_id, lat, lon, source="ESP32"):
-    """Sends sensor data to CWOP/findu.com using official APRS-IS format"""
+    global last_cwop_push_time
+    
+    # FAQ Rule: Not more often than every 5 minutes (300 seconds)
+    now = time.time()
+    if now - last_cwop_push_time < 295: # 5s buffer
+        return
+
     try:
-        if not cwop_id:
-            return
+        if not cwop_id: return
 
         print(f"[{datetime.now()}] CWOP Push ({source})...")
 
@@ -51,7 +59,6 @@ def send_to_cwop(raw_data, cwop_id, lat, lon, source="ESP32"):
         time_str = datetime.now(timezone.utc).strftime("%d%H%Mz")
 
         # 2. Format Coordinates: DDMM.hhN / DDDMM.hhW
-        # Spec requires DD (2 digits for lat) and DDD (3 digits for lon)
         lat_abs = abs(lat)
         lat_deg = int(lat_abs)
         lat_min = (lat_abs - lat_deg) * 60
@@ -73,7 +80,6 @@ def send_to_cwop(raw_data, cwop_id, lat, lon, source="ESP32"):
         hum_raw = raw_data.get('humidity', raw_data.get('hum'))
         hum_val = int(round(float(hum_raw or 0))) if hum_raw is not None else None
         
-        # Barometer: convert to tenths of millibars
         pres_hpa = raw_data.get('pres')
         if pres_hpa is not None:
             barom_mb_tenths = int(round(float(pres_hpa) * 10))
@@ -81,7 +87,6 @@ def send_to_cwop(raw_data, cwop_id, lat, lon, source="ESP32"):
             barom_in = raw_data.get('baromrelin')
             barom_mb_tenths = int(round(float(barom_in) * 33.8639 * 10)) if barom_in is not None else None
 
-        # Wind
         wdir = int(round(float(raw_data.get('winddir', 0))))
         wind_kmh = raw_data.get('wind')
         if wind_kmh is not None:
@@ -92,14 +97,12 @@ def send_to_cwop(raw_data, cwop_id, lat, lon, source="ESP32"):
             wgst_val = raw_data.get('windgustmph')
             wgst_mph = f"{int(round(float(wgst_val))):03d}" if wgst_val is not None else "..."
         
-        # Rain
         rain_1h_in = raw_data.get('hourlyrainin')
         r_1h = f"{int(round(float(rain_1h_in) * 100)):03d}" if rain_1h_in is not None else "..."
         
         rain_24h_in = raw_data.get('dailyrainin')
         p_24h = f"{int(round(float(rain_24h_in) * 100)):03d}" if rain_24h_in is not None else "..."
         
-        # Solar Radiation
         solar_rad = raw_data.get('solarradiation')
         solar_str = ""
         if solar_rad is not None:
@@ -107,28 +110,24 @@ def send_to_cwop(raw_data, cwop_id, lat, lon, source="ESP32"):
             solar_str = f"L{solar_w:03d}" if solar_w <= 999 else f"l{int(solar_w-1000):03d}"
 
         if temp_f is None or barom_mb_tenths is None:
-            print(f"  Skip: Missing data.")
             return
 
-        # Temperature string (handles negative)
         temp_str = f"t{temp_f:03d}" if temp_f >= 0 else f"t-{abs(temp_f):02d}"
         hum_str = "00" if (hum_val is not None and hum_val >= 100) else (f"{hum_val:02d}" if hum_val is not None else "..")
 
         # 4. Official CWOP Header and Payload
-        # Header: STATION>APRS,TCPXX,qAX,CWOP-n:
-        # We use a standard TCPIP* header for APRS-IS
+        # Added space before 'Allsky' comment as recommended
         wx_payload = f"{time_str}{lat_str}/{lon_str}_c{wdir:03d}s{wspd_mph:03d}g{wgst_mph}{temp_str}r{r_1h}p{p_24h}P{p_24h}h{hum_str}b{barom_mb_tenths:05d}{solar_str}"
-        packet = f"{cwop_id}>APRS,TCPIP*:@{wx_payload}ESP32\r\n"
+        packet = f"{cwop_id}>APRS,TCPIP*:@{wx_payload} AllskyCloud\r\n"
 
-        # 5. Send to official CWOP ingest server
+        # 5. Connect to Region-specific rotation for North America
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(10)
-            # Use 'rotate.aprs2.net' as it is the most reliable entry point for APRS-IS
-            s.connect(("rotate.aprs2.net", 14580))
-            s.sendall(f"user {cwop_id} pass -1 vers AllskyCloud 1.4\r\n".encode('utf-8'))
-            # Wait for login ack (optional but good for debug)
+            s.connect(("cwop.aprs.net", 14580))
+            s.sendall(f"user {cwop_id} pass -1 vers AllskyCloud 1.5\r\n".encode('utf-8'))
             s.sendall(packet.encode('utf-8'))
             print(f"  Sent: {packet.strip()}")
+            last_cwop_push_time = now
             
     except Exception as e:
         print(f"  CWOP Error: {e}")
