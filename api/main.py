@@ -113,10 +113,29 @@ def send_to_cwop(raw_data, cwop_id, lat, lon, source="ESP32"):
         packet = f"{cwop_id}>APRS,TCPIP*:@{wx_payload} AllskyCloud\r\n"
 
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.settimeout(10)
+            s.settimeout(15)
             s.connect(("cwop.aprs.net", 14580))
+
+            # Wait for the server greeting before logging in
+            buf = b""
+            deadline = time.time() + 10
+            while b"\n" not in buf and time.time() < deadline:
+                chunk = s.recv(512)
+                if not chunk: break
+                buf += chunk
+
             s.sendall(f"user {cwop_id} pass -1 vers AllskyCloud 1.6\r\n".encode('utf-8'))
+
+            # Wait for the logresp line confirming the server processed our login
+            buf = b""
+            deadline = time.time() + 10
+            while b"logresp" not in buf and time.time() < deadline:
+                chunk = s.recv(512)
+                if not chunk: break
+                buf += chunk
+
             s.sendall(packet.encode('utf-8'))
+            time.sleep(2)  # let the server flush before FIN
             print(f"  Sent: {packet.strip()}")
             
     except Exception as e:
