@@ -109,7 +109,7 @@ def send_to_cwop(raw_data, cwop_id, lat, lon, source="ESP32"):
         temp_str = f"t{temp_f:03d}" if temp_f >= 0 else f"t-{abs(temp_f):02d}"
         hum_str = "00" if (hum_val is not None and hum_val >= 100) else (f"{hum_val:02d}" if hum_val is not None else "..")
 
-        wx_payload = f"{time_str}{lat_str}/{lon_str}_c{wdir:03d}s{wspd_mph:03d}g{wgst_mph}{temp_str}r{r_1h}p{p_24h}P{p_24h}h{hum_str}b{barom_mb_tenths:05d}{solar_str}"
+        wx_payload = f"{time_str}{lat_str}/{lon_str}_{wdir:03d}/{wspd_mph:03d}g{wgst_mph}{temp_str}r{r_1h}p{p_24h}P{p_24h}h{hum_str}b{barom_mb_tenths:05d}{solar_str}"
         packet = f"{cwop_id}>APRS,TCPIP*:@{wx_payload} AllskyCloud\r\n"
 
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -117,26 +117,28 @@ def send_to_cwop(raw_data, cwop_id, lat, lon, source="ESP32"):
             s.connect(("cwop.aprs.net", 14580))
 
             # Wait for the server greeting before logging in
-            buf = b""
+            greeting = b""
             deadline = time.time() + 10
-            while b"\n" not in buf and time.time() < deadline:
+            while b"\n" not in greeting and time.time() < deadline:
                 chunk = s.recv(512)
                 if not chunk: break
-                buf += chunk
+                greeting += chunk
+            print(f"  CWOP greeting: {greeting.decode('utf-8', errors='replace').strip()}")
 
             s.sendall(f"user {cwop_id} pass -1 vers AllskyCloud 1.6\r\n".encode('utf-8'))
 
             # Wait for the logresp line confirming the server processed our login
-            buf = b""
+            logresp = b""
             deadline = time.time() + 10
-            while b"logresp" not in buf and time.time() < deadline:
+            while b"logresp" not in logresp and time.time() < deadline:
                 chunk = s.recv(512)
                 if not chunk: break
-                buf += chunk
+                logresp += chunk
+            print(f"  CWOP logresp: {logresp.decode('utf-8', errors='replace').strip()}")
 
             s.sendall(packet.encode('utf-8'))
-            time.sleep(2)  # let the server flush before FIN
             print(f"  Sent: {packet.strip()}")
+            time.sleep(2)  # let the server flush before FIN
             
     except Exception as e:
         print(f"  CWOP Error: {e}")
