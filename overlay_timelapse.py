@@ -15,9 +15,13 @@ def load_thermal_image(thermal_bmp_path):
                 data = json.load(f)
             
             if 'frame' in data:
-                raw_frame = np.array(data['frame'], dtype=np.float32)
-                # Reshape to 24x32
-                raw_frame = raw_frame.reshape((24, 32))
+                raw_frame_1d = np.array(data['frame'], dtype=np.float32)
+                if len(raw_frame_1d) == 768:
+                    raw_frame = raw_frame_1d.reshape((24, 32))
+                elif len(raw_frame_1d) == 384:
+                    raw_frame = raw_frame_1d.reshape((16, 24))
+                else:
+                    raise ValueError(f"Unknown frame size: {len(raw_frame_1d)}")
                 
                 # Normalize the temperatures to 0-255
                 min_val = np.min(raw_frame)
@@ -183,7 +187,7 @@ def generate_overlay(date_str, allsky_root, thermal_root, output_file, ccd_uuid,
             img_thermal = cv2.flip(img_thermal, 0)
 
         # Warp thermal image to allsky fisheye projection
-        # INTER_CUBIC gives a nice smooth upscale for the tiny 24x32 thermal data
+        # INTER_CUBIC gives a nice smooth upscale for the tiny 16x24 thermal data
         thermal_warped = cv2.remap(img_thermal, map_x, map_y, cv2.INTER_CUBIC, 
                                    borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0))
         
