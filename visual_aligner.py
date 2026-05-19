@@ -72,9 +72,13 @@ def load_thermal_image(thermal_bmp_path):
                 data = json.load(f)
             
             if 'frame' in data:
-                raw_frame = np.array(data['frame'], dtype=np.float32)
-                # Reshape to 24x32
-                raw_frame = raw_frame.reshape((24, 32))
+                raw_frame_1d = np.array(data['frame'], dtype=np.float32)
+                if len(raw_frame_1d) == 768:
+                    raw_frame = raw_frame_1d.reshape((24, 32))
+                elif len(raw_frame_1d) == 384:
+                    raw_frame = raw_frame_1d.reshape((16, 24))
+                else:
+                    raise ValueError(f"Unknown frame size: {len(raw_frame_1d)}")
                 
                 # Normalize the temperatures to 0-255
                 min_val = np.min(raw_frame)
@@ -85,9 +89,7 @@ def load_thermal_image(thermal_bmp_path):
                 else:
                     norm_frame = np.zeros_like(raw_frame, dtype=np.uint8)
                 
-                # Apply a high dynamic range colormap (INFERNO is great for heat)
-                color_frame = cv2.applyColorMap(norm_frame, cv2.COLORMAP_INFERNO)
-                return color_frame
+                return norm_frame  # Return 1-channel grayscale to be colored dynamically
         except Exception as e:
             print(f"Failed to parse json {json_path}: {e}")
             print("Falling back to BMP.")
@@ -108,7 +110,7 @@ def main(input_file, allsky_root, thermal_root, ccd_uuid):
     if is_allsky:
         try:
             idx = input_p.parts.index('images')
-            rel_parts = input_p.parts[idx+1:-1]
+            rel_parts = input_p.parts[idx+1:] if input_p.is_dir() else input_p.parts[idx+1:-1]
         except ValueError:
             print("Could not parse allsky path. Make sure it contains an 'images' directory.")
             return
@@ -118,7 +120,7 @@ def main(input_file, allsky_root, thermal_root, ccd_uuid):
     elif is_thermal:
         try:
             idx = input_p.parts.index('exposures')
-            rel_parts = input_p.parts[idx+1:-1]
+            rel_parts = input_p.parts[idx+1:] if input_p.is_dir() else input_p.parts[idx+1:-1]
         except ValueError:
             print("Could not parse thermal path. Make sure it contains an 'exposures' directory.")
             return
@@ -136,8 +138,10 @@ def main(input_file, allsky_root, thermal_root, ccd_uuid):
         print(f"Thermal directory not found: {thermal_dir}")
         return
 
-    print(f"Scanning for matching pairs in {rel_parts}...")
-    allsky_files = sorted(list(allsky_dir.glob("*.jpg")))
+        print(f"Scanning Allsky: {allsky_dir}")
+    print(f"Scanning Thermal: {thermal_dir}")
+    allsky_files = sorted(list(allsky_dir.glob("*.[jJ][pP][gG]")))
+    print(f"  Found {len(allsky_files)} Allsky files.")
     
     valid_pairs = []
     start_idx = 0
@@ -160,16 +164,34 @@ def main(input_file, allsky_root, thermal_root, ccd_uuid):
     cv2.namedWindow('Visual Aligner', cv2.WINDOW_NORMAL)
     cv2.resizeWindow('Visual Aligner', 800, 1000)
     
+    # Load Config
+    config_path = Path("alignment_config.json")
+    config = {
+        "proj_on": 1, "flip_h": 0, "flip_v": 1,
+        "fov": 74, "rot": 202, "x_off": -0.04,
+        "y_off": 0.12, "dist": 0.0, "alpha": 1.0, "cmap": 11, "render_mode": 0, "threshold_val": 128
+    }
+    if config_path.exists():
+        try:
+            with open(config_path, 'r') as f:
+                config.update(json.load(f))
+            print(f"Loaded config from {config_path}")
+        except Exception as e:
+            print(f"Failed to load config: {e}")
+
     # Create Trackbars
-    cv2.createTrackbar('Proj 1=On', 'Visual Aligner', 1, 1, nothing)
-    cv2.createTrackbar('Flip H', 'Visual Aligner', 0, 1, nothing)
-    cv2.createTrackbar('Flip V', 'Visual Aligner', 0, 1, nothing)
-    cv2.createTrackbar('FOV (deg)', 'Visual Aligner', 55, 120, nothing)
-    cv2.createTrackbar('Rot (deg)', 'Visual Aligner', 0, 360, nothing)
-    cv2.createTrackbar('X Offset', 'Visual Aligner', 100, 200, nothing)  # 100 is 0 offset
-    cv2.createTrackbar('Y Offset', 'Visual Aligner', 100, 200, nothing)  # 100 is 0 offset
-    cv2.createTrackbar('Distort', 'Visual Aligner', 100, 200, nothing)   # 100 is 0 distortion
-    cv2.createTrackbar('Alpha %', 'Visual Aligner', 65, 100, nothing)
+    cv2.createTrackbar('Proj 1=On', 'Visual Aligner', config['proj_on'], 1, nothing)
+    cv2.createTrackbar('Flip H', 'Visual Aligner', config['flip_h'], 1, nothing)
+    cv2.createTrackbar('Flip V', 'Visual Aligner', config['flip_v'], 1, nothing)
+    cv2.createTrackbar('FOV (deg)', 'Visual Aligner', int(config['fov']), 120, nothing)
+    cv2.createTrackbar('Rot (deg)', 'Visual Aligner', int(config['rot']), 360, nothing)
+    cv2.createTrackbar('X Offset', 'Visual Aligner', int((config['x_off'] * 100) + 100), 200, nothing)
+    cv2.createTrackbar('Y Offset', 'Visual Aligner', int((config['y_off'] * 100) + 100), 200, nothing)
+    cv2.createTrackbar('Distort', 'Visual Aligner', int((config['dist'] * 50) + 100), 200, nothing)
+    cv2.createTrackbar('Alpha %', 'Visual Aligner', int(config['alpha'] * 100), 100, nothing)
+    cv2.createTrackbar('Colormap', 'Visual Aligner', int(config.get('cmap', 11)), 21, nothing)
+    cv2.createTrackbar('Render Mode', 'Visual Aligner', config.get('render_mode', 0), 3, nothing)
+    cv2.createTrackbar('Thresh Val', 'Visual Aligner', config.get('threshold_val', 128), 255, nothing)
 
     print("\n==========================================")
     print("             VISUAL ALIGNER               ")
@@ -180,6 +202,7 @@ def main(input_file, allsky_root, thermal_root, ccd_uuid):
     print(" [ a ] or [ <- ] : Previous Image")
     print(" [ d ] or [ -> ] : Next Image")
     print(" [ p ]           : Print Parameters")
+    print(" [ s ]           : Save Parameters to Config")
     print(" [ q ] or ESC    : Quit")
     print("==========================================\n")
 
@@ -221,6 +244,9 @@ def main(input_file, allsky_root, thermal_root, ccd_uuid):
         y_off_raw = cv2.getTrackbarPos('Y Offset', 'Visual Aligner')
         dist_raw = cv2.getTrackbarPos('Distort', 'Visual Aligner')
         alpha_pct = cv2.getTrackbarPos('Alpha %', 'Visual Aligner')
+        cmap_idx = cv2.getTrackbarPos('Colormap', 'Visual Aligner')
+        render_mode = cv2.getTrackbarPos('Render Mode', 'Visual Aligner')
+        thresh_val = cv2.getTrackbarPos('Thresh Val', 'Visual Aligner')
 
         # Convert trackbar values to actual math values
         x_off = (x_off_raw - 100) / 100.0  # -1.0 to 1.0
@@ -228,7 +254,7 @@ def main(input_file, allsky_root, thermal_root, ccd_uuid):
         dist = (dist_raw - 100) / 50.0     # -2.0 to 2.0
         alpha = alpha_pct / 100.0
 
-        current_state = (proj_on, flip_h, flip_v, fov, rot, x_off, y_off, dist, alpha)
+        current_state = (proj_on, flip_h, flip_v, fov, rot, x_off, y_off, dist, alpha, cmap_idx, render_mode, thresh_val)
 
         if current_state != prev_state or force_update:
             # Apply flips to thermal image
@@ -244,9 +270,28 @@ def main(input_file, allsky_root, thermal_root, ccd_uuid):
                 # Recalculate maps if anything but alpha changed
                 map_x, map_y, valid_mask = build_maps(a_w, a_h, t_w, t_h, 180.0, fov, rot, x_off, y_off, dist, proj_on)
             
-            # Warp thermal
-            thermal_warped = cv2.remap(img_t, map_x, map_y, cv2.INTER_CUBIC, 
-                                       borderMode=cv2.BORDER_CONSTANT, borderValue=(0,0,0))
+            # Warp thermal (1-channel grayscale)
+            warped_gray = cv2.remap(img_t, map_x, map_y, cv2.INTER_CUBIC, 
+                                       borderMode=cv2.BORDER_CONSTANT, borderValue=(0,))
+            
+            if render_mode == 1:
+                # Mode 1: Canny Edges (Neon Green)
+                edges = cv2.Canny(warped_gray, 40, 120)
+                thermal_warped = np.zeros((a_h, a_w, 3), dtype=np.uint8)
+                thermal_warped[edges > 0] = [0, 255, 0]
+            elif render_mode == 2:
+                # Mode 2: Iso-Contours (Cyan Topography)
+                quantized = (warped_gray // 32) * 32
+                edges = cv2.Canny(quantized.astype(np.uint8), 10, 50)
+                thermal_warped = np.zeros((a_h, a_w, 3), dtype=np.uint8)
+                thermal_warped[edges > 0] = [255, 255, 0]
+            elif render_mode == 3:
+                # Mode 3: Threshold Mask (Black & White shape)
+                _, thresh = cv2.threshold(warped_gray, thresh_val, 255, cv2.THRESH_BINARY)
+                thermal_warped = cv2.cvtColor(thresh, cv2.COLOR_GRAY2BGR)
+            else:
+                # Mode 0: Dynamic Colormap
+                thermal_warped = cv2.applyColorMap(warped_gray, cmap_idx)
             
             # Blend
             alpha_mask = np.zeros((a_h, a_w, 1), dtype=np.float32)
@@ -272,8 +317,20 @@ def main(input_file, allsky_root, thermal_root, ccd_uuid):
             proj_str = "" if proj_on else " --no-projection"
             fh_str = " --flip-h" if flip_h else ""
             fv_str = " --flip-v" if flip_v else ""
-            print(f"\n--- Current Parameters ---")
-            print(f"--thermal-fov {fov} --rotation {rot} --offset-x {x_off:.2f} --offset-y {y_off:.2f} --distortion {dist:.2f} --alpha {alpha:.2f}{proj_str}{fh_str}{fv_str}")
+            print("\n--- Current Parameters ---")
+            print(f"--thermal-fov {fov} --rotation {rot} --offset-x {x_off:.2f} --offset-y {y_off:.2f} --distortion {dist:.2f} --alpha {alpha:.2f}{proj_str}{fh_str}{fv_str} (Colormap: {cmap_idx})")
+        elif key == ord('s'):
+            save_data = {
+                "proj_on": proj_on, "flip_h": flip_h, "flip_v": flip_v,
+                "fov": fov, "rot": rot, "x_off": x_off,
+                "y_off": y_off, "dist": dist, "alpha": alpha, "cmap": cmap_idx, "render_mode": render_mode, "threshold_val": thresh_val
+            }
+            try:
+                with open(config_path, 'w') as f:
+                    json.dump(save_data, f, indent=4)
+                    print(f"\n[SUCCESS] Saved current parameters to {config_path}")
+            except Exception as e:
+                print(f"\n[ERROR] Failed to save config: {e}")
         elif key == ord('d') or key == 83:  # 'd' or Right Arrow
             if current_idx < len(valid_pairs) - 1:
                 current_idx += 1
