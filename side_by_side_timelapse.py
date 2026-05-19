@@ -15,9 +15,13 @@ def load_thermal_image(thermal_bmp_path):
                 data = json.load(f)
             
             if 'frame' in data:
-                raw_frame = np.array(data['frame'], dtype=np.float32)
-                # Reshape to 24x32
-                raw_frame = raw_frame.reshape((24, 32))
+                raw_frame_1d = np.array(data['frame'], dtype=np.float32)
+                if len(raw_frame_1d) == 768:
+                    raw_frame = raw_frame_1d.reshape((24, 32))
+                elif len(raw_frame_1d) == 384:
+                    raw_frame = raw_frame_1d.reshape((16, 24))
+                else:
+                    raise ValueError(f"Unknown frame size: {len(raw_frame_1d)}")
                 
                 # Normalize the temperatures to 0-255
                 min_val = np.min(raw_frame)

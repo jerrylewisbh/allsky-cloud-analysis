@@ -11,7 +11,13 @@ def load_thermal_image(thermal_bmp_path):
             with open(json_path, 'r') as f:
                 data = json.load(f)
             if 'frame' in data:
-                raw_frame = np.array(data['frame'], dtype=np.float32).reshape((24, 32))
+                raw_frame_1d = np.array(data['frame'], dtype=np.float32)
+                if len(raw_frame_1d) == 768:
+                    raw_frame = raw_frame_1d.reshape((24, 32))
+                elif len(raw_frame_1d) == 384:
+                    raw_frame = raw_frame_1d.reshape((16, 24))
+                else:
+                    raise ValueError(f"Unknown frame size: {len(raw_frame_1d)}")
                 min_val, max_val = np.min(raw_frame), np.max(raw_frame)
                 if max_val > min_val:
                     norm_frame = ((raw_frame - min_val) / (max_val - min_val) * 255).astype(np.uint8)
