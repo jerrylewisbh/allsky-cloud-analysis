@@ -1,8 +1,8 @@
 # Allsky Cloud Analysis
 
-This repository contains tools for aligning, projecting, and analyzing thermal imaging data alongside visual Allsky fisheye captures, including a complete containerized data ingestion pipeline.
+This repository contains tools for aligning, projecting, and analyzing thermal imaging data alongside visual Allsky fisheye captures.
 
-## 🚀 Data Ingestion Pipeline (Backend)
+## Data Ingestion Pipeline
 
 The backend provides a central database and API to store allsky metadata, thermal frames, and synchronized weather data.
 
@@ -11,7 +11,7 @@ The backend provides a central database and API to store allsky metadata, therma
 *   **API (FastAPI):** Orchestrates data ingestion and automatic time-syncing between cameras and weather stations.
 *   **Orchestration (Docker):** Deployable on any Ubuntu/Linux server with Docker installed.
 
-### Deployment on Ubuntu Server
+### Deployment
 1.  **Clone the repository:**
     ```bash
     git clone <your-repo-url>
@@ -27,7 +27,7 @@ The backend provides a central database and API to store allsky metadata, therma
     *   **Path:** `/weather`
     *   **Port:** `8000`
 
-### Client Setup (Allsky Pi)
+### Client Setup (nid Allsky)
 Move `scripts/sky_thermal_postsave_hook.py` to your Allsky Pi and configure the `ANALYSIS_API_URL` to point to your server. Add it as a post-save hook in your Allsky configuration.
 
 ---
@@ -60,3 +60,6 @@ Generates comparative stacked videos of the raw allsky and thermal heatmaps.
 ```bash
 pip install -r requirements.txt
 ```
+
+## Algorithms and Mathematics
+For a detailed explanation of the projection math, Mutual Information auto-alignment, and the thermal cloud-detection thresholds used in this project, please see the [Algorithms Documentation](ALGORITHMS.md).
