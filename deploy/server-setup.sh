@@ -180,15 +180,10 @@ else
     warn "Labeling UI not responding yet — check: docker logs labeling-tool"
 fi
 
-# ---------- 9. Install crontab ----------
+# ---------- 9. Install crontab (append-or-update, preserves other jobs) ----------
 bold "--- Crontab ---"
-# Substitute PROJECT_DIR_ROOT in the template, install
-CRON_TMP="$(mktemp)"
-sed "s|^PROJECT_DIR_ROOT=.*|PROJECT_DIR_ROOT=${PROJECT_DIR}|" \
-    deploy/crontab.template > "${CRON_TMP}"
-crontab "${CRON_TMP}"
-rm -f "${CRON_TMP}"
-echo "Crontab installed. Active jobs:"
+./deploy/install-crontab.sh
+echo "Active jobs:"
 crontab -l | grep -E '^[0-9*]' | sed 's/^/  /'
 
 # ---------- 10. Done ----------
