@@ -131,8 +131,15 @@ echo "Directories created/verified"
 
 # ---------- 6. Host venv (for cron jobs) ----------
 bold "--- Host venv ---"
+# Detect a previous failed venv attempt (directory exists but pip is missing)
+# and rebuild from scratch, otherwise we'd try to invoke .venv/bin/pip below
+# and crash with "No such file or directory".
+if [ -d .venv ] && [ ! -x .venv/bin/pip ]; then
+    warn "Found broken .venv (no pip) — removing and recreating"
+    rm -rf .venv
+fi
 if [ ! -d .venv ]; then
-    python3 -m venv .venv
+    python3 -m venv .venv || die "venv creation failed even though python3-venv is installed — try: rm -rf .venv && python3 -m venv .venv"
     echo "Created .venv"
 fi
 .venv/bin/pip install --quiet --upgrade pip
