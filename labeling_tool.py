@@ -196,6 +196,22 @@ def find_full_allsky_path(frame_id: str) -> str | None:
 
 
 @st.cache_data(show_spinner=False)
+def load_hand_labels_index(csv_path: str, mtime: float) -> dict[str, dict]:
+    """Returns {frame_id: row_dict} for fast hand-class lookups in filters.
+    Separate from load_labels() (which returns a DataFrame for the distribution
+    chart) — this one is a dict so compute_matching_ids stays O(1) per frame.
+    """
+    p = Path(csv_path)
+    if not p.exists():
+        return {}
+    out: dict[str, dict] = {}
+    with open(p, newline="") as f:
+        for row in csv.DictReader(f):
+            out[row["frame_id"]] = row
+    return out
+
+
+@st.cache_data(show_spinner=False)
 def load_auto_labels(csv_path: str, mtime: float) -> dict[str, dict]:
     """Returns {frame_id: {auto_class, auto_confidence, auto_reasoning}}.
     Used by the review-queue filter — much faster than recomputing auto_classify
@@ -477,28 +493,41 @@ def compute_matching_ids(
     frame_ids: tuple[str, ...],
     auto_csv: str, auto_mtime: float,
     weak_csv: str, weak_mtime: float,
+    hand_csv: str, hand_mtime: float,
     wanted_confidences: frozenset[str] | None,
     wanted_classes: frozenset[str] | None,
-    wanted_regime: str | None,
+    wanted_regimes: frozenset[str] | None,
+    wanted_hand_classes: frozenset[str] | None,
+    id_substring: str,
 ) -> frozenset[str]:
     """Pre-compute the set of frame_ids passing all active filters in one sweep.
 
-    Pure dict lookups against the already-cached auto/weak label indices —
+    Pure dict lookups against the already-cached auto/weak/hand label indices —
     no PIL I/O, no live auto_classify fallback. Cached per (filter combo,
-    csv mtimes) so it survives reruns until either file changes on disk.
+    csv mtimes) so it survives reruns until any indexed file changes on disk.
     """
-    auto_index = load_auto_labels(auto_csv, auto_mtime)
-    weak_index = load_weak_labels(weak_csv, weak_mtime) if wanted_regime else {}
+    auto_needed = wanted_confidences is not None or wanted_classes is not None
+    auto_index = load_auto_labels(auto_csv, auto_mtime) if auto_needed else {}
+    weak_index = load_weak_labels(weak_csv, weak_mtime) if wanted_regimes else {}
+    hand_index = load_hand_labels_index(hand_csv, hand_mtime) if wanted_hand_classes else {}
+    sub = id_substring.lower().strip()
     out: set[str] = set()
     for fid in frame_ids:
-        row = auto_index.get(fid)
-        if row is None:
+        if sub and sub not in fid.lower():
             continue
-        if wanted_confidences is not None and row.get("auto_confidence") not in wanted_confidences:
-            continue
-        if wanted_classes is not None and row.get("auto_class") not in wanted_classes:
-            continue
-        if wanted_regime is not None:
+        if wanted_hand_classes is not None:
+            hand_row = hand_index.get(fid)
+            if hand_row is None or hand_row.get("class") not in wanted_hand_classes:
+                continue
+        if auto_needed:
+            row = auto_index.get(fid)
+            if row is None:
+                continue
+            if wanted_confidences is not None and row.get("auto_confidence") not in wanted_confidences:
+                continue
+            if wanted_classes is not None and row.get("auto_class") not in wanted_classes:
+                continue
+        if wanted_regimes is not None:
             wf = weak_index.get(fid, {})
             sun_alt_row = wf.get(("ephemeris", "sun_alt_deg"))
             if sun_alt_row is None:
@@ -507,7 +536,7 @@ def compute_matching_ids(
                 sun_alt = float(sun_alt_row["value"])
             except (TypeError, ValueError):
                 continue
-            if _sun_regime(sun_alt) != wanted_regime:
+            if _sun_regime(sun_alt) not in wanted_regimes:
                 continue
         out.add(fid)
     return frozenset(out)
@@ -584,18 +613,41 @@ def main() -> None:
                 "confidence=high** validates the high-conf clear predictions."
             ),
         )
-        regime_filter = st.selectbox(
+        regime_filter = st.multiselect(
             "Sun regime",
-            ["any"] + REGIMES,
-            index=0,
+            REGIMES,
+            default=[],
             help=(
                 "Filter by solar regime (from ephemeris.sun_alt_deg). "
                 "**DAY** sun≥6°, **TWILIGHT** −6°..6°, **NAUTICAL** −12°..−6°, "
-                "**ASTRO** −18°..−12°, **DARK** sun<−18°. Useful for batching "
-                "similarly-lit frames — daytime RGB calls vs nighttime mpsas calls "
-                "use very different mental models."
+                "**ASTRO** −18°..−12°, **DARK** sun<−18°. Empty = any. "
+                "Multi-select to audit \"any night\" by picking "
+                "TWILIGHT+NAUTICAL+ASTRO+DARK."
             ),
         )
+
+        st.markdown("**Hand-label audit** — filter by your own labels")
+        hand_class_filter = st.selectbox(
+            "Hand-label class",
+            ["any"] + CLASSES,
+            index=0,
+            help=(
+                "Show only frames you already hand-labeled with this class. "
+                "Combine with **Sun regime** to audit suspicious cases — e.g. "
+                "`hand_class=cu` + `regime=ASTRO+DARK+NAUTICAL` finds cumulus "
+                "labels at sun-below-horizon times (Cu needs convective heating "
+                "and shouldn't form pre-dawn). Remember to also uncheck "
+                "'Skip already-labeled' above so the matches actually appear."
+            ),
+        )
+        frame_id_search = st.text_input(
+            "Frame ID contains",
+            value="",
+            help="Substring match on frame_id (case-insensitive). Useful for "
+                 "jumping to a specific date prefix like `20260519_10` or to "
+                 "the exact frame from a disagreement report.",
+        )
+
         colormap_name = st.selectbox(
             "Thermal colormap",
             list(COLORMAPS.keys()),
@@ -676,20 +728,29 @@ def main() -> None:
     if class_filter != "any":
         wanted_classes = frozenset({class_filter})
 
-    wanted_regime: str | None = None if regime_filter == "any" else regime_filter
+    wanted_regimes: frozenset[str] | None = frozenset(regime_filter) if regime_filter else None
+    wanted_hand_classes: frozenset[str] | None = (
+        None if hand_class_filter == "any" else frozenset({hand_class_filter})
+    )
+    id_substring = frame_id_search.strip()
+
+    hand_mtime = LABELS_CSV.stat().st_mtime if LABELS_CSV.exists() else 0.0
 
     review_filter = None
     any_filter_active = (wanted_confidences is not None or wanted_classes is not None
-                         or wanted_regime is not None)
+                         or wanted_regimes is not None or wanted_hand_classes is not None
+                         or bool(id_substring))
     if any_filter_active:
-        # One sweep over the cached auto/weak indices. No PIL I/O, no live
-        # auto_classify fallback — frames missing from auto_labels.csv are
-        # simply excluded (the user is told to re-run auto_classify_batch.py).
+        # One sweep over the cached auto/weak/hand indices. No PIL I/O, no
+        # live auto_classify fallback — frames missing from auto_labels.csv
+        # are simply excluded (the user is told to re-run auto_classify_batch.py).
         matching_ids = compute_matching_ids(
             tuple(p["frame_id"] for p in pairs),
             str(AUTO_LABELS_CSV), auto_mtime,
             str(WEAK_LABELS_CSV), weak_mtime,
-            wanted_confidences, wanted_classes, wanted_regime,
+            str(LABELS_CSV), hand_mtime,
+            wanted_confidences, wanted_classes, wanted_regimes,
+            wanted_hand_classes, id_substring,
         )
 
         def review_filter(p, _ids=matching_ids):
@@ -698,11 +759,15 @@ def main() -> None:
         n_match = len(matching_ids)
         filter_desc = []
         if wanted_confidences is not None:
-            filter_desc.append(f"conf={','.join(sorted(wanted_confidences))}")
+            filter_desc.append(f"auto_conf={','.join(sorted(wanted_confidences))}")
         if wanted_classes is not None:
-            filter_desc.append(f"class={','.join(sorted(wanted_classes))}")
-        if wanted_regime is not None:
-            filter_desc.append(f"regime={wanted_regime}")
+            filter_desc.append(f"auto_class={','.join(sorted(wanted_classes))}")
+        if wanted_regimes is not None:
+            filter_desc.append(f"regime={','.join(sorted(wanted_regimes))}")
+        if wanted_hand_classes is not None:
+            filter_desc.append(f"hand_class={','.join(sorted(wanted_hand_classes))}")
+        if id_substring:
+            filter_desc.append(f"id~{id_substring!r}")
         st.sidebar.caption(
             f"**Filter ({' · '.join(filter_desc)}): {n_match} of {len(pairs)} frames match** "
             f"({100 * n_match / max(len(pairs), 1):.1f}%)."
