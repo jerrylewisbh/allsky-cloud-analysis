@@ -1,0 +1,9 @@
+.venv/
+# Server-side config — never commit
+deploy/.env
+goes_cache/
+dataset_v2_*/
+labels/auto_labels.csv
+labels/weak_labels.csv
+labels/hand_labeled.csv.bak.*
+/var/log/allsky-cloud-analysis/

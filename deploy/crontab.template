@@ -1,0 +1,27 @@
+# allsky-cloud-analysis — scheduled jobs
+# Install:  crontab deploy/crontab.template
+# Inspect:  crontab -l
+# Logs:     /var/log/allsky-cloud-analysis/*.log
+
+# Edit ONLY the PROJECT_DIR_ROOT below to match your install path.
+# (The wrappers source deploy/.env for everything else.)
+
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+PROJECT_DIR_ROOT=/home/YOURUSER/allsky-cloud-analysis
+LOG_DIR=/var/log/allsky-cloud-analysis
+
+# Daily 04:00 local — generate masks for yesterday's captures
+0 4 * * * $PROJECT_DIR_ROOT/deploy/cron/daily-mask-gen.sh >> $LOG_DIR/daily-mask-gen.log 2>&1
+
+# Weekly Monday 02:00 — METAR (both stations)
+0 2 * * 1 $PROJECT_DIR_ROOT/deploy/cron/weekly-metar.sh >> $LOG_DIR/weekly-metar.log 2>&1
+
+# Weekly Monday 02:30 — local AWNET + ESP sensors from PG
+30 2 * * 1 $PROJECT_DIR_ROOT/deploy/cron/weekly-local-sensors.sh >> $LOG_DIR/weekly-local-sensors.log 2>&1
+
+# Weekly Monday 03:00 — GOES-19 ABI products (~1–2 hr depending on coverage)
+0 3 * * 1 $PROJECT_DIR_ROOT/deploy/cron/weekly-goes.sh >> $LOG_DIR/weekly-goes.log 2>&1
+
+# Weekly Monday 06:00 — regenerate auto_labels.csv (after all data refresh)
+0 6 * * 1 $PROJECT_DIR_ROOT/deploy/cron/weekly-auto-classify.sh >> $LOG_DIR/weekly-auto-classify.log 2>&1
