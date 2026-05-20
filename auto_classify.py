@@ -233,27 +233,31 @@ def classify(weak: dict[tuple, dict],
     cloud_evidence       = n_sc  + 0.5 * n_w
     local_cloud_evidence = local_sc + 0.5 * local_w
 
-    # 1. All-strong-clear with at most one boundary signal — high confidence.
+    # 1. All-strong-clear with at most one boundary signal.
     #    Requires 3+ strong-clear votes so one weak signal can be dismissed
     #    as noise. The previous version required zero weak signals, which
-    #    with 6+ sources reporting per frame was essentially unreachable
-    #    (every frame has at least one boundary reading).
+    #    with 6+ sources reporting per frame was essentially unreachable.
     #
-    #    Regime-aware floor: in NAUTICAL/ASTRO twilight (sun_alt −18°..−6°),
-    #    thin Ci is optically invisible to every physics sensor (thermal,
-    #    mpsas, GOES, METAR can all read clear) while remaining visually
-    #    obvious to a labeler watching wispy streaks against the post-sunset
-    #    sky. So in those regimes we require an extra strong-clear vote
-    #    (n_scl >= 4) before claiming high confidence. Outside twilight,
-    #    3 strong-clear votes still suffice — a deep-night DARK regime with
-    #    moonless sky genuinely has no labeler advantage over the sensors.
-    twilight = sun_alt is not None and -18.0 <= sun_alt < -6.0
-    min_strong_clear = 4 if twilight else 3
-    if n_sc == 0 and n_w <= 1 and n_scl >= min_strong_clear:
+    #    Regime-aware confidence cap: in NAUTICAL/ASTRO twilight (sun_alt
+    #    −18°..−6°), thin Ci is optically invisible to every physics sensor
+    #    (thermal, mpsas, GOES, METAR can all read "clear") while remaining
+    #    visually obvious to a labeler watching wispy streaks against the
+    #    post-sunset sky. Empirically, of 31 NAUTICAL frames where four
+    #    sensors agreed clear, only ~20% were truly clear — the rest had
+    #    Ci the sensors couldn't see. So we cap the verdict at "medium" in
+    #    twilight. The previous attempt (raising the threshold to n_scl≥4)
+    #    didn't help because the offending frames easily clear that bar —
+    #    the information for thin-Ci-at-twilight simply isn't in the signals.
+    #    "high" is reserved for DAY (sun visible — if it's truly clear,
+    #    GOES + METAR + AWNET all confirm it) and DARK (no twilight Ci
+    #    advantage to the human eye over the sensors).
+    if n_sc == 0 and n_w <= 1 and n_scl >= 3:
+        twilight = sun_alt is not None and -18.0 <= sun_alt < -6.0
         sig = ", ".join(v[2] for v in strong_clear)
         weak_note = "" if n_w == 0 else f" (one boundary signal: {weak_cloud[0][2]})"
-        twi_note = " (twilight: needed n_scl≥4)" if twilight else ""
-        return "clear", "high", f"{n_scl} signals strongly clear ({sig}){weak_note}{twi_note}"
+        conf = "medium" if twilight else "high"
+        twi_note = " — capped at medium (twilight Ci sensor blind spot)" if twilight else ""
+        return "clear", conf, f"{n_scl} signals strongly clear ({sig}){weak_note}{twi_note}"
 
     # 2. No signals at all says cloud — but only one signal available.
     if n_sc == 0 and n_w == 0:
