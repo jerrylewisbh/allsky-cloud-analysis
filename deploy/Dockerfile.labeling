@@ -21,7 +21,9 @@ RUN pip install --no-cache-dir \
         "opencv-python>=4.8,<5"
 
 COPY labeling_tool.py auto_classify.py ./
-COPY docs/ ./docs/
+# Note: docs/ is intentionally NOT copied into the image — those are
+# paper/protocol drafts for humans, not used at runtime. Mount them in
+# with `-v $(pwd)/docs:/app/docs:ro` if you want to read them inside.
 
 # Streamlit config via env so docker-compose can override.
 ENV PYTHONUNBUFFERED=1 \
