@@ -237,13 +237,23 @@ def classify(weak: dict[tuple, dict],
     #    Requires 3+ strong-clear votes so one weak signal can be dismissed
     #    as noise. The previous version required zero weak signals, which
     #    with 6+ sources reporting per frame was essentially unreachable
-    #    (every frame has at least one boundary reading). The 3-strong floor
-    #    keeps the gate strict — Ci-at-night frames with only thermal+mpsas
-    #    voting clear still don't qualify.
-    if n_sc == 0 and n_w <= 1 and n_scl >= 3:
+    #    (every frame has at least one boundary reading).
+    #
+    #    Regime-aware floor: in NAUTICAL/ASTRO twilight (sun_alt −18°..−6°),
+    #    thin Ci is optically invisible to every physics sensor (thermal,
+    #    mpsas, GOES, METAR can all read clear) while remaining visually
+    #    obvious to a labeler watching wispy streaks against the post-sunset
+    #    sky. So in those regimes we require an extra strong-clear vote
+    #    (n_scl >= 4) before claiming high confidence. Outside twilight,
+    #    3 strong-clear votes still suffice — a deep-night DARK regime with
+    #    moonless sky genuinely has no labeler advantage over the sensors.
+    twilight = sun_alt is not None and -18.0 <= sun_alt < -6.0
+    min_strong_clear = 4 if twilight else 3
+    if n_sc == 0 and n_w <= 1 and n_scl >= min_strong_clear:
         sig = ", ".join(v[2] for v in strong_clear)
         weak_note = "" if n_w == 0 else f" (one boundary signal: {weak_cloud[0][2]})"
-        return "clear", "high", f"{n_scl} signals strongly clear ({sig}){weak_note}"
+        twi_note = " (twilight: needed n_scl≥4)" if twilight else ""
+        return "clear", "high", f"{n_scl} signals strongly clear ({sig}){weak_note}{twi_note}"
 
     # 2. No signals at all says cloud — but only one signal available.
     if n_sc == 0 and n_w == 0:
