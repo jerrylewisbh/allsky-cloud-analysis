@@ -56,6 +56,22 @@ PY_MAJMIN="$(echo "${PY_VER}" | awk -F. '{print ($1*100)+$2}')"
 if [ "${PY_MAJMIN}" -lt 310 ]; then
     die "Python 3.10+ required (found ${PY_VER})"
 fi
+
+# On Debian/Ubuntu, python3-venv is a separate package and is needed for
+# `python3 -m venv`. Check it BEFORE the venv step so the user gets a clean
+# message instead of cryptic ensurepip errors halfway through setup.
+if ! python3 -c "import ensurepip" >/dev/null 2>&1; then
+    die "python3-venv module missing — install with: sudo apt install -y python${PY_VER}-venv"
+fi
+if ! python3 -c "import venv" >/dev/null 2>&1; then
+    die "python3-venv module missing — install with: sudo apt install -y python${PY_VER}-venv"
+fi
+
+# pip availability is bundled with ensurepip but worth confirming
+if ! python3 -m pip --version >/dev/null 2>&1; then
+    warn "system pip not available — venv will bootstrap its own, should be fine"
+fi
+
 echo "Python ${PY_VER} ✓"
 echo "Docker $(docker --version | awk '{print $3}' | tr -d ',') ✓"
 
