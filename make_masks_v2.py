@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -283,12 +284,19 @@ def process_frame(fp: FramePaths, config: dict) -> dict | None:
 
 
 def main():
+    # Default config + NAS paths resolve relative to this script's directory,
+    # so the script works regardless of which cwd it's invoked from (cron,
+    # manual shell, etc.) without needing to cd first.
+    SCRIPT_DIR = Path(__file__).parent.resolve()
     parser = argparse.ArgumentParser()
     parser.add_argument("--day", required=True, help="YYYYMMDD")
-    parser.add_argument("--allsky-root", default="/Volumes/allsky_images")
+    parser.add_argument("--allsky-root",
+                        default=os.environ.get("NAS_ALLSKY_PATH", "/mnt/allsky_images"))
     parser.add_argument("--thermal-root",
-                        default="/Volumes/astro_image_thermal/ccd_25ccc900-4f15-4ac2-9d29-507e89f7c212")
-    parser.add_argument("--config", default="allsky-cloud-analysis/alignment_config.json")
+                        default=os.environ.get(
+                            "NAS_THERMAL_PATH", "/mnt/astro_image_thermal") + "/" +
+                            os.environ.get("NAS_THERMAL_UUID", ""))
+    parser.add_argument("--config", default=str(SCRIPT_DIR / "alignment_config.json"))
     parser.add_argument("--output-root", default=None, help="defaults to dataset_v2_<day>")
     parser.add_argument("--max-pairs", type=int, default=0, help="0 = all")
     parser.add_argument("--sample-stride", type=int, default=1)
