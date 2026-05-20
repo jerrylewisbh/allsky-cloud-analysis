@@ -107,11 +107,20 @@ def classify(weak: dict[tuple, dict],
     votes: list[tuple[str, bool | None, str, bool]] = []
 
     if thermal_mean_p is not None:
+        # The MLX90640 only sees the ~110°×75° patch directly overhead, not
+        # the full fisheye view. A "clear" thermal reading means "no cloud
+        # in the center patch" — clouds at the horizon are invisible to it.
+        # So thermal-clear is downgraded to weak when METAR reports regional
+        # BKN/OVC: a clear pocket overhead is plausible, but so is thin cloud
+        # outside the narrow FOV that the labeler can see in the fisheye.
         if thermal_mean_p > 0.4:
             v = True
         elif thermal_mean_p > 0.2:
-            v = None  # weak: thermal sensor sees something below the
-                      # strong-cloud threshold but above the noise floor
+            v = None  # boundary: thermal sees something between noise and cloud
+        elif thermal_mean_p < 0.05:
+            v = False  # extremely confident clear in the center patch
+        elif metar_okta is not None and metar_okta >= 5:
+            v = None  # narrow-FOV clear contradicted by METAR BKN/OVC → weak
         else:
             v = False
         votes.append(("thermal", v, f"thermal_p={thermal_mean_p:.2f}", True))
@@ -224,13 +233,17 @@ def classify(weak: dict[tuple, dict],
     cloud_evidence       = n_sc  + 0.5 * n_w
     local_cloud_evidence = local_sc + 0.5 * local_w
 
-    # 1. All-strong-clear AND no weak hints — only path to "high" clear.
-    #    This is the critical fix: previously, weak hints were silently
-    #    discarded, producing confident-but-wrong "clear high" verdicts on
-    #    thermal-weak cloud regimes (St, Cu, Sc, thin Ci).
-    if n_sc == 0 and n_w == 0 and n_scl >= 2:
+    # 1. All-strong-clear with at most one boundary signal — high confidence.
+    #    Requires 3+ strong-clear votes so one weak signal can be dismissed
+    #    as noise. The previous version required zero weak signals, which
+    #    with 6+ sources reporting per frame was essentially unreachable
+    #    (every frame has at least one boundary reading). The 3-strong floor
+    #    keeps the gate strict — Ci-at-night frames with only thermal+mpsas
+    #    voting clear still don't qualify.
+    if n_sc == 0 and n_w <= 1 and n_scl >= 3:
         sig = ", ".join(v[2] for v in strong_clear)
-        return "clear", "high", f"all {n_scl} signals strongly clear ({sig})"
+        weak_note = "" if n_w == 0 else f" (one boundary signal: {weak_cloud[0][2]})"
+        return "clear", "high", f"{n_scl} signals strongly clear ({sig}){weak_note}"
 
     # 2. No signals at all says cloud — but only one signal available.
     if n_sc == 0 and n_w == 0:
@@ -259,11 +272,18 @@ def classify(weak: dict[tuple, dict],
     elif local_cloud_evidence > local_scl and (local_sc + local_w) >= 2:
         confident_cloud = (local_scl == 0 and local_sc >= 2)
 
-    # 7. Local clear signals dominate:
+    # 7. Local clear signals dominate — but defer to METAR if it sees regional
+    #    BKN/OVC. A clear pocket overhead is plausible, but so is "thin cloud
+    #    outside the narrow-FOV thermal sensor that the labeler can see in the
+    #    full fisheye." When METAR contradicts, fall through to family rules
+    #    as low-confidence cloud instead of forcing clear.
     elif local_scl >= 2 and local_scl > local_cloud_evidence:
-        sig = ", ".join(v[2] for v in strong_clear if v[3])
-        return "clear", "medium", \
-               f"local says clear ({sig}); regional/weak signals disagree"
+        if metar_okta is not None and metar_okta >= 6:
+            confident_cloud = False  # fall through to family resolution below
+        else:
+            sig = ", ".join(v[2] for v in strong_clear if v[3])
+            return "clear", "medium", \
+                   f"local says clear ({sig}); regional/weak signals disagree"
 
     # 8. Truly mixed — humans should adjudicate.
     else:
@@ -308,9 +328,15 @@ def classify(weak: dict[tuple, dict],
 
     # ---- Rule 5: genus within family ----
     if family == "high":
-        # Ci (isolated streaks) vs Cs (sheet) vs Cc (ripples) need RGB texture.
-        # Default to cs_cc (more common than isolated Ci); humans frequently
-        # override when they see distinct fibrous streaks.
+        # Ci (thin streaks) vs Cs (sheet) vs Cc (ripples) need RGB texture in
+        # general, but there's one regime where physics decides: at night,
+        # thin cirrus is optically thin, so GOES sees a high-altitude cloud
+        # top while the local thermal sensor barely registers it. When the
+        # thermal vote is absent or sub-0.3 despite a confirmed high-family
+        # cloud, Ci is more likely than dense Cs/Cc.
+        if is_night and (thermal_mean_p is None or thermal_mean_p < 0.3):
+            return "ci", "medium", "; ".join(
+                reasoning_bits + ["nighttime high cloud, thermal_p<0.3 → Ci-like thin"])
         return "cs_cc", "low", "; ".join(reasoning_bits + ["Ci/Cs/Cc need RGB texture"])
 
     if family == "mid":
@@ -321,8 +347,18 @@ def classify(weak: dict[tuple, dict],
         if humidity is not None and humidity > 90:
             return "st", "medium", "; ".join(
                 reasoning_bits + [f"humidity {humidity:.0f}% suggests St/fog"])
-        # Cu vs Sc requires RGB texture; default to Sc (more common when
-        # local signals confirm continuous low cloud cover)
+        # Cumulus is convective (daytime) and discontinuous (METAR not OVC,
+        # CSI showing intermittent shading rather than steady attenuation).
+        # METAR genus hint is the most direct signal when available.
+        if metar_genus in ("CU", "TCU"):
+            return "cu", "medium", "; ".join(
+                reasoning_bits + [f"METAR genus {metar_genus}"])
+        if (is_day and metar_okta is not None and 1 <= metar_okta <= 4
+                and csi is not None and 0.55 <= csi <= 1.05):
+            return "cu", "low", "; ".join(reasoning_bits + [
+                f"day + METAR {metar_okta}/8 scattered + CSI {csi:.2f} → Cu over Sc"])
+        # Cu vs Sc otherwise requires RGB texture; default to Sc (more common
+        # when local signals confirm continuous low cloud cover)
         return "sc", "low", "; ".join(reasoning_bits + ["Cu vs Sc needs RGB texture"])
 
     return "multi", "low", "fell through family rules"
@@ -344,7 +380,11 @@ if __name__ == "__main__":
     }
     print("Frame 1 (ac_as expected):", classify(f1, thermal_mean_p=0.68))
 
-    # Frame 2: ccd1_20260518_225250 — nautical twilight, clear pocket in regional cloud
+    # Frame 2: ccd1_20260518_225250 — nautical twilight, METAR BKN+CB regional,
+    # local sensors say clear. Post-patch: defers to METAR (Rule 7 guard) and
+    # returns "sc low" instead of "clear medium". This is the intended fix:
+    # the labeler often disagrees with the old "confident clear" verdict when
+    # METAR reports substantial cloud the narrow-FOV sensors can't see.
     f2 = {
         ("ephemeris", "sun_alt_deg"):      {"value": "-11.06"},
         ("ephemeris", "moon_alt_deg"):     {"value": "12.37"},
@@ -359,7 +399,7 @@ if __name__ == "__main__":
         ("metar", "altitude_bucket"):            {"value": "mid"},
         ("metar", "cloud_genus_hint"):           {"value": "CB"},
     }
-    print("Frame 2 (clear expected):", classify(f2, thermal_mean_p=0.01))
+    print("Frame 2 (sc low expected — METAR override):", classify(f2, thermal_mean_p=0.01))
 
     # Edge: a raining frame (should short-circuit to ns_cb)
     f3 = {
