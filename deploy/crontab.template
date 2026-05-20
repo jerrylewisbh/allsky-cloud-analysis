@@ -20,8 +20,9 @@ LOG_DIR=/var/log/allsky-cloud-analysis
 # Weekly Monday 02:30 — local AWNET + ESP sensors from PG
 30 2 * * 1 $PROJECT_DIR_ROOT/deploy/cron/weekly-local-sensors.sh >> $LOG_DIR/weekly-local-sensors.log 2>&1
 
-# Weekly Monday 03:00 — GOES-19 ABI products (~1–2 hr depending on coverage)
-0 3 * * 1 $PROJECT_DIR_ROOT/deploy/cron/weekly-goes.sh >> $LOG_DIR/weekly-goes.log 2>&1
+# Weekly Monday 05:00 — GOES-19 ABI products (~1–2 hr).
+# Bumped from 03:00 to clear the daily backup_to_nas.sh window.
+0 5 * * 1 $PROJECT_DIR_ROOT/deploy/cron/weekly-goes.sh >> $LOG_DIR/weekly-goes.log 2>&1
 
-# Weekly Monday 06:00 — regenerate auto_labels.csv (after all data refresh)
-0 6 * * 1 $PROJECT_DIR_ROOT/deploy/cron/weekly-auto-classify.sh >> $LOG_DIR/weekly-auto-classify.log 2>&1
+# Weekly Monday 08:00 — regenerate auto_labels.csv (after GOES finishes)
+0 8 * * 1 $PROJECT_DIR_ROOT/deploy/cron/weekly-auto-classify.sh >> $LOG_DIR/weekly-auto-classify.log 2>&1
