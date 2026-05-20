@@ -11,3 +11,10 @@ venv.bak/
 .docker_data/
 postgres_data/
 crops/
+deploy/.env
+goes_cache/
+dataset_v2_*/
+labels/
+labels/auto_labels.csv
+labels/weak_labels.csv
+labels/hand_labeled.csv.bak.*

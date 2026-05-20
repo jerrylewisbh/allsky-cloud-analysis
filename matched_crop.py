@@ -4,45 +4,78 @@ import json
 import argparse
 from pathlib import Path
 
-def load_thermal_image(thermal_bmp_path):
+def load_thermal_data(thermal_bmp_path):
     json_path = Path(thermal_bmp_path).with_suffix('.json')
-    if json_path.exists():
-        try:
-            with open(json_path, 'r') as f:
-                data = json.load(f)
-            if 'frame' in data:
-                raw_frame_1d = np.array(data['frame'], dtype=np.float32)
-                if len(raw_frame_1d) == 768:
-                    raw_frame = raw_frame_1d.reshape((24, 32))
-                elif len(raw_frame_1d) == 384:
-                    raw_frame = raw_frame_1d.reshape((16, 24))
-                else:
-                    raise ValueError(f"Unknown frame size: {len(raw_frame_1d)}")
-                min_val, max_val = np.min(raw_frame), np.max(raw_frame)
-                if max_val > min_val:
-                    norm_frame = ((raw_frame - min_val) / (max_val - min_val) * 255).astype(np.uint8)
-                else:
-                    norm_frame = np.zeros_like(raw_frame, dtype=np.uint8)
-                return cv2.applyColorMap(norm_frame, cv2.COLORMAP_INFERNO)
-        except Exception: pass
-    return cv2.imread(str(thermal_bmp_path))
+    if not json_path.exists(): return None, None
+    try:
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        if 'frame' in data:
+            raw_frame_1d = np.array(data['frame'], dtype=np.float32)
+            ambient = data.get('sensors', {}).get('temp', 20.0)
+            if len(raw_frame_1d) == 768: return raw_frame_1d.reshape((24, 32)), ambient
+            elif len(raw_frame_1d) == 384: return raw_frame_1d.reshape((16, 24)), ambient
+    except Exception: pass
+    return None, None
+
+def get_hybrid_mask(img_rgb, thermal_frame, ambient, abs_thresh=-20.0):
+    h, w = img_rgb.shape[:2]
+    
+    # 1. Thermal Confidence (The Absolute Truth)
+    t_min = abs_thresh - 10.0
+    t_max = abs_thresh + 10.0
+    t_conf = np.clip((thermal_frame - t_min) / (t_max - t_min), 0, 1)
+    t_mask = cv2.resize(t_conf, (w, h), interpolation=cv2.INTER_CUBIC)
+
+    # 2. Visual Features (The Edge Refiners)
+    b, g, r = cv2.split(img_rgb.astype(np.float32))
+    nrbr = (r - b) / (r + b + 1e-6)
+    v_color = np.clip((nrbr + 0.35) / 0.4, 0, 1)
+    
+    gray = cv2.cvtColor(img_rgb, cv2.COLOR_BGR2GRAY)
+    v_text = np.clip(np.sqrt(cv2.Sobel(gray, cv2.CV_64F, 1, 0)**2 + cv2.Sobel(gray, cv2.CV_64F, 0, 1)**2) / 25.0, 0, 1)
+    v_mask = (v_color * 0.7) + (v_text * 0.3)
+
+    # 3. Dynamic Calibration
+    # Find the average intensity of the visual mask where thermal says it is CLEAR SKY
+    sky_mask = (t_mask < 0.1).astype(np.float32)
+    if np.sum(sky_mask) > 100:
+        sky_bias = np.sum(v_mask * sky_mask) / np.sum(sky_mask)
+        # Subtract the sky bias from the whole visual mask to remove atmospheric ghosting
+        v_mask = np.clip(v_mask - (sky_bias * 0.8), 0, 1)
+        # Boost the remaining visual signal to match thermal cloud intensity
+        v_mask = np.clip(v_mask * 1.5, 0, 1)
+
+    # 4. Seamless Fusion
+    # We use a soft transition mask (feather) to hide the boundary
+    feather = np.ones((h, w), dtype=np.float32)
+    fs = int(min(h, w) * 0.2)
+    cv2.rectangle(feather, (0,0), (w-1, h-1), 0, fs*2)
+    feather = cv2.stackBlur(feather, (fs*2+1, fs*2+1))
+
+    # Inside: result = thermal weighted by visual texture
+    # Outside: result = visual only
+    # The trick: use thermal to "gate" the visual signal in the center
+    t_gated_v = np.maximum(t_mask, v_mask * 0.5) 
+    
+    combined = (t_gated_v * feather) + (v_mask * (1.0 - feather))
+    
+    # Final sharpening
+    combined = np.power(np.clip(combined, 0, 1), 1.2)
+    
+    return (combined * 255).astype(np.uint8)
 
 def build_remap_matrices(allsky_w, allsky_h, thermal_w, thermal_h, 
                          allsky_fov_deg, thermal_fov_deg, rotation_deg, offset_x_pct, offset_y_pct, distortion, proj_on):
-    cx_a = (allsky_w / 2.0) + (offset_x_pct * (allsky_w / 2.0))
-    cy_a = (allsky_h / 2.0) + (offset_y_pct * (allsky_h / 2.0))
+    cx_a, cy_a = (allsky_w / 2.0) + (offset_x_pct * (allsky_w / 2.0)), (allsky_h / 2.0) + (offset_y_pct * (allsky_h / 2.0))
     R_a = allsky_w / 2.0
     max_theta_a = np.radians(allsky_fov_deg / 2.0)
-    
     thermal_fov_rad = np.radians(thermal_fov_deg)
     f_t = (thermal_w / 2.0) / np.tan(thermal_fov_rad / 2.0)
     cx_t, cy_t = thermal_w / 2.0, thermal_h / 2.0
-    
     X, Y = np.meshgrid(np.arange(allsky_w), np.arange(allsky_h))
     dx, dy = X - cx_a, Y - cy_a
-    r = np.sqrt(dx**2 + dy**2)
-    phi = np.arctan2(dy, dx) + np.radians(rotation_deg)
-    
+    r, phi = np.sqrt(dx**2 + dy**2), np.arctan2(dy, dx) + np.radians(rotation_deg)
     if not proj_on:
         scale = (thermal_fov_deg / allsky_fov_deg) * allsky_w
         s_factor = thermal_w / scale
@@ -51,10 +84,8 @@ def build_remap_matrices(allsky_w, allsky_h, thermal_w, thermal_h,
         invalid = (map_x < 0) | (map_x >= thermal_w) | (map_y < 0) | (map_y >= thermal_h)
         map_x[invalid], map_y[invalid] = -1, -1
         return map_x.astype(np.float32), map_y.astype(np.float32), ~invalid
-
     r_norm = r / R_a
-    gamma = 2.0 ** distortion
-    theta = (r_norm ** gamma) * max_theta_a
+    theta = (r_norm ** (2.0 ** distortion)) * max_theta_a
     valid_theta = theta < (np.pi / 2 - 0.01)
     d_t = np.zeros_like(theta)
     d_t[valid_theta] = f_t * np.tan(theta[valid_theta])
@@ -63,60 +94,67 @@ def build_remap_matrices(allsky_w, allsky_h, thermal_w, thermal_h,
     map_x[invalid], map_y[invalid] = -1, -1
     return map_x.astype(np.float32), map_y.astype(np.float32), ~invalid
 
-def main():
-    parser = argparse.ArgumentParser(description='Create matched crops of Allsky and Thermal images')
-    parser.add_argument('--allsky', type=str, required=True)
-    parser.add_argument('--thermal', type=str, required=True)
-    parser.add_argument('--thermal-fov', type=float, default=55.0)
-    parser.add_argument('--rotation', type=float, default=0.0)
-    parser.add_argument('--offset-x', type=float, default=0.0)
-    parser.add_argument('--offset-y', type=float, default=0.0)
-    parser.add_argument('--distortion', type=float, default=0.0)
-    parser.add_argument('--no-projection', action='store_true')
-    parser.add_argument('--flip-h', action='store_true')
-    parser.add_argument('--flip-v', action='store_true')
-    parser.add_argument('--output-dir', type=str, default='crops')
-    parser.add_argument('--size', type=int, default=0, help='Force output crops to square size (e.g. 512)')
-    
-    args = parser.parse_args()
-    
-    img_a = cv2.imread(args.allsky)
-    img_t_raw = load_thermal_image(args.thermal)
-    
-    if args.flip_h and args.flip_v: img_t_raw = cv2.flip(img_t_raw, -1)
-    elif args.flip_h: img_t_raw = cv2.flip(img_t_raw, 1)
-    elif args.flip_v: img_t_raw = cv2.flip(img_t_raw, 0)
-    
-    a_h, a_w = img_a.shape[:2]
-    t_h, t_w = img_t_raw.shape[:2]
-    
-    map_x, map_y, mask = build_remap_matrices(a_w, a_h, t_w, t_h, 180.0, 
-                                            args.thermal_fov, args.rotation, 
-                                            args.offset_x, args.offset_y, 
-                                            args.distortion, not args.no_projection)
-    
-    warped_t = cv2.remap(img_t_raw, map_x, map_y, cv2.INTER_CUBIC, borderValue=(0,0,0))
-    
-    # Find bounding box of the valid thermal area
-    coords = np.argwhere(mask)
-    y0, x0 = coords.min(axis=0)
-    y1, x1 = coords.max(axis=0)
-    
-    crop_a = img_a[y0:y1, x0:x1]
-    crop_t = warped_t[y0:y1, x0:x1]
-    
+def process_pair(allsky_p, thermal_p, config, args):
+    img_a_full = cv2.imread(str(allsky_p))
+    thermal_raw, ambient = load_thermal_data(thermal_p)
+    if img_a_full is None or thermal_raw is None: return
+    if config.get('flip_h', 0) and config.get('flip_v', 1): thermal_raw = np.flip(thermal_raw, (0, 1))
+    elif config.get('flip_h', 0): thermal_raw = np.flip(thermal_raw, 1)
+    elif config.get('flip_v', 1): thermal_raw = np.flip(thermal_raw, 0)
+    a_h, a_w = img_a_full.shape[:2]
+    t_h, t_w = thermal_raw.shape[:2]
+    map_x, map_y, valid_mask = build_remap_matrices(a_w, a_h, t_w, t_h, 180.0, config['fov'], config['rot'], config['x_off'], config['y_off'], config['dist'], config.get('proj_on', 1))
+    coords = np.argwhere(valid_mask)
+    if len(coords) == 0: return
+    pad = 30
+    y0, x0 = max(0, coords[:,0].min()-pad), max(0, coords[:,1].min()-pad)
+    y1, x1 = min(a_h, coords[:,0].max()+pad), min(a_w, coords[:,1].max()+pad)
+    img_crop, map_x_crop, map_y_crop = img_a_full[y0:y1, x0:x1], map_x[y0:y1, x0:x1], map_y[y0:y1, x0:x1]
+    warped_thermal = cv2.remap(thermal_raw, map_x_crop, map_y_crop, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    hybrid_mask = get_hybrid_mask(img_crop, warped_thermal, ambient, abs_thresh=args.abs_thresh)
     if args.size > 0:
-        crop_a = cv2.resize(crop_a, (args.size, args.size), interpolation=cv2.INTER_AREA)
-        crop_t = cv2.resize(crop_t, (args.size, args.size), interpolation=cv2.INTER_CUBIC)
-    
+        img_crop = cv2.resize(img_crop, (args.size, args.size), interpolation=cv2.INTER_AREA)
+        hybrid_mask = cv2.resize(hybrid_mask, (args.size, args.size), interpolation=cv2.INTER_LINEAR)
     out_path = Path(args.output_dir)
     out_path.mkdir(exist_ok=True)
-    
-    base = Path(args.allsky).stem
-    cv2.imwrite(str(out_path / f"{base}_allsky.jpg"), crop_a)
-    cv2.imwrite(str(out_path / f"{base}_thermal.jpg"), crop_t)
-    
-    print(f"Saved matched crops to {args.output_dir}/")
+    (out_path / 'images').mkdir(exist_ok=True); (out_path / 'masks').mkdir(exist_ok=True)
+    cv2.imwrite(str(out_path / 'images' / f'{allsky_p.stem}.jpg'), img_crop)
+    cv2.imwrite(str(out_path / 'masks' / f'{allsky_p.stem}.png'), hybrid_mask)
 
-if __name__ == "__main__":
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('input_path', type=str)
+    parser.add_argument('--allsky-root', type=str, default='/Volumes/allsky_images')
+    parser.add_argument('--thermal-root', type=str, default='/Volumes/astro_image_thermal')
+    parser.add_argument('--uuid', type=str, default='ccd_25ccc900-4f15-4ac2-9d29-507e89f7c212')
+    parser.add_argument('--config', default='allsky-cloud-analysis/alignment_config.json')
+    parser.add_argument('--output-dir', type=str, default='ml_dataset_hybrid')
+    parser.add_argument('--size', type=int, default=256)
+    parser.add_argument('--abs-thresh', type=float, default=-20.0)
+    parser.add_argument('--max-pairs', type=int, default=0)
+    args = parser.parse_args()
+    input_p = Path(args.input_path).resolve()
+    with open(args.config, 'r') as f: config = json.load(f)
+    pairs = []
+    if input_p.is_dir():
+        all_jpgs = sorted(list(input_p.rglob('*.[jJ][pP][gG]')))
+        for a_p in all_jpgs:
+            if 'thumbnails' in str(a_p): continue
+            parts = a_p.parts
+            try:
+                img_idx = parts.index('images')
+                rel = Path(*parts[img_idx+1:])
+                t_p = Path(args.thermal_root) / args.uuid / 'exposures' / rel.with_suffix('.bmp')
+                if t_p.exists(): pairs.append((a_p, t_p))
+            except ValueError: pass
+    if args.max_pairs > 0 and len(pairs) > args.max_pairs:
+        indices = np.linspace(0, len(pairs)-1, args.max_pairs, dtype=int)
+        pairs = [pairs[i] for i in indices]
+    print(f'Generating Calibrated Hybrid dataset for {len(pairs)} pairs...')
+    for i, (a_p, t_p) in enumerate(pairs):
+        process_pair(a_p, t_p, config, args)
+        if i % 5 == 0: print(f'  {i}/{len(pairs)}...', end='\r')
+    print(f'\nDone.')
+
+if __name__ == '__main__':
     main()
