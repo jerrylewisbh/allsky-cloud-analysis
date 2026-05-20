@@ -355,6 +355,141 @@ def render_context_panel(weak: dict[tuple, dict]) -> None:
                     st.text(f"  {attr}: {row['value']} {unit}{offs_str}")
 
 
+def render_decision_tree(frame_id: str, regime: str,
+                         auto_label: str, auto_conf: str) -> dict | None:
+    """Interactive classification helper. Returns {class, reasoning} or None
+    if the user hasn't answered enough questions to reach a leaf.
+
+    The tree is a guided version of docs/labeling-protocol.md §"Genus decision":
+    coverage → texture → (cell size | sheet density), with two cross-checks
+    against metadata at the end (auto-classifier agreement; regime sanity).
+
+    Widget keys are frame-scoped so navigating to the next frame doesn't
+    carry over the previous frame's answers.
+    """
+    def k(name: str) -> str:
+        return f"dt_{name}_{frame_id}"
+
+    suggestion: dict | None = None
+
+    coverage = st.radio(
+        "**1.** How much of the visible sky has cloud?",
+        ["—",
+         "Mostly clear (>90% cloud-free, only isolated wisps)",
+         "Partial coverage — clear blue/dark sky visible between clouds",
+         "Full coverage — no clear sky gaps anywhere",
+         "Two distinct decks visible (different cloud bases at once)"],
+        key=k("coverage"), index=0,
+    )
+
+    if coverage.startswith("Mostly clear"):
+        suggestion = {"class": "clear",
+                      "reasoning": "You reported >90% cloud-free sky"}
+    elif coverage.startswith("Two distinct"):
+        suggestion = {"class": "multi",
+                      "reasoning": "You reported two distinct cloud decks"}
+    elif coverage in ("Partial coverage — clear blue/dark sky visible between clouds",
+                     "Full coverage — no clear sky gaps anywhere"):
+        texture = st.radio(
+            "**2.** What's the dominant cloud texture?",
+            ["—",
+             "Wispy / fibrous / streaky lines (like mare's tails)",
+             "Cellular / lumpy / rippled (visible repeating units)",
+             "Smooth uniform sheet (no internal structure)",
+             "Discrete puffs with flat bases (cumuliform)",
+             "Dark deep cloud with falling precipitation visible"],
+            key=k("texture"), index=0,
+        )
+
+        if texture.startswith("Wispy"):
+            suggestion = {"class": "ci",
+                          "reasoning": "Fibrous streaks → Cirrus"}
+        elif texture.startswith("Dark deep"):
+            suggestion = {"class": "ns_cb",
+                          "reasoning": "Precipitation visible → Nimbostratus / Cumulonimbus"}
+        elif texture.startswith("Discrete puffs"):
+            suggestion = {"class": "cu",
+                          "reasoning": "Convective puffs with flat bases → Cumulus"}
+        elif texture.startswith("Cellular"):
+            cells = st.radio(
+                "**3.** Cell size near the **zenith** (ignore horizon foreshortening):",
+                ["—",
+                 "Fine mackerel ripples (>50 cells across the sky)",
+                 "Medium cells (~20 across, roughly 3–5° each)",
+                 "Large lumpy patches (<10 across the sky, ≥5° each)"],
+                key=k("cells"), index=0,
+            )
+            if cells.startswith("Fine"):
+                suggestion = {"class": "cs_cc",
+                              "reasoning": "Fine ripples → Cirrocumulus (high)"}
+            elif cells.startswith("Medium"):
+                suggestion = {"class": "ac_as",
+                              "reasoning": "Mid-sized cells → Altocumulus (mid)"}
+            elif cells.startswith("Large"):
+                suggestion = {"class": "sc",
+                              "reasoning": "Large lumpy patches → Stratocumulus (low)"}
+        elif texture.startswith("Smooth uniform"):
+            sheet = st.radio(
+                "**3.** Sheet character:",
+                ["—",
+                 "Thin milky sheet — sun visible as a clear disc through it",
+                 "Mid-grey sheet — sun barely visible / appears hazy",
+                 "Low uniform grey lid — sun completely blocked or absent"],
+                key=k("sheet"), index=0,
+            )
+            if sheet.startswith("Thin milky"):
+                suggestion = {"class": "cs_cc",
+                              "reasoning": "High thin uniform sheet → Cirrostratus"}
+            elif sheet.startswith("Mid-grey"):
+                suggestion = {"class": "ac_as",
+                              "reasoning": "Mid grey sheet → Altostratus"}
+            elif sheet.startswith("Low uniform"):
+                suggestion = {"class": "st",
+                              "reasoning": "Uniform low lid → Stratus"}
+
+    # ---- present suggestion + cross-checks ----
+    if suggestion is None:
+        st.caption("_Answer the questions above to get a suggested class._")
+        return None
+
+    cls = suggestion["class"]
+
+    # Regime sanity checks
+    warnings: list[str] = []
+    if cls == "cu" and regime not in ("DAY", "TWILIGHT"):
+        warnings.append(
+            f"Cu requires convective heating but regime is **{regime}** (sun "
+            "below horizon). Often these turn out to be Sc fragments or "
+            "broken Ac. Re-check before saving."
+        )
+    if cls == "ns_cb" and regime not in ("DAY", "TWILIGHT"):
+        warnings.append(
+            f"Ns/Cb is hard to confirm at night ({regime}). If you can't see "
+            "lightning or hear thunder, consider Sc/St instead."
+        )
+    if cls == "st" and regime in ("NAUTICAL", "ASTRO", "DARK"):
+        warnings.append(
+            f"St at {regime} is climatologically unusual (St is typically a "
+            "fog/morning-overcast cloud). Make sure it's a uniform grey lid "
+            "and not just dim sky."
+        )
+
+    cols = st.columns([2, 2, 3])
+    cols[0].markdown(f"### 🧭 Decision tree\n**{cls.upper()}**")
+    cols[1].markdown(f"### 🤖 Auto-classifier\n**{auto_label.upper()}** ({auto_conf})")
+    with cols[2]:
+        if cls == auto_label:
+            st.success(f"✓ Agreement — both say **{cls}**")
+        else:
+            st.warning(f"⚠ Disagreement — tree says **{cls}**, auto says "
+                       f"**{auto_label}**. You're the tiebreaker.")
+        st.caption(f"_Reasoning:_ {suggestion['reasoning']}")
+        for w in warnings:
+            st.warning(w)
+
+    return suggestion
+
+
 def colorize_mask(mask_path: str, colormap: str = "sky_cloud (custom)") -> np.ndarray:
     raw = np.array(Image.open(mask_path).convert("L"))
     valid = raw != NO_DATA_VALUE
@@ -893,6 +1028,17 @@ def main() -> None:
                         else (CLASSES.index(auto_label) if auto_label in CLASSES else 0))
     default_conf_idx = (existing_index(CONFIDENCES, "confidence") if has_existing
                        else (CONFIDENCES.index(auto_conf) if auto_conf in CONFIDENCES else 0))
+
+    # Optional decision-tree helper — collapsed by default for experienced
+    # labelers; guides newer labelers (or genus-ambiguous frames) through the
+    # standard protocol questions and cross-checks against auto + regime.
+    with st.expander("🧭 Classification helper (decision tree)", expanded=False):
+        sun_alt_row = weak_for_frame.get(("ephemeris", "sun_alt_deg"))
+        try:
+            current_regime = _sun_regime(float(sun_alt_row["value"])) if sun_alt_row else "UNKNOWN"
+        except (TypeError, ValueError):
+            current_regime = "UNKNOWN"
+        render_decision_tree(pair["frame_id"], current_regime, auto_label, auto_conf)
 
     st.subheader("Label")
     form_cols = st.columns([3, 2])
