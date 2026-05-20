@@ -325,18 +325,32 @@ def section_recommendations(out, merged: pd.DataFrame, hand: pd.DataFrame,
             "Run `.venv/bin/python auto_classify_batch.py` to refresh."
         )
 
-    # Calibration
+    # Calibration — record both accuracy and sample size so we can suppress
+    # warnings on tiny samples (e.g. n_high=2 reports "50%" which is noise).
     cal = {}
+    cal_n = {}
     for c in CONFIDENCES:
         sub = merged[merged["auto_confidence"] == c]
         if len(sub):
             cal[c] = int((sub["class_hand"] == sub["auto_class"]).sum()) / len(sub)
-    if cal.get("high", 0) < 0.90:
+            cal_n[c] = len(sub)
+    HIGH_MIN_N = 20
+    if cal_n.get("high", 0) < HIGH_MIN_N:
+        if cal_n.get("high", 0) > 0:
+            notes.append(
+                f"High-confidence verdicts: only {cal_n['high']} frames "
+                f"({cal.get('high', 0):.0%} agreement) — below the n≥{HIGH_MIN_N} "
+                "threshold needed to judge calibration. Headline accuracy is "
+                "statistically meaningless at this sample size; ignore until "
+                "more `high` verdicts accumulate or the gate is loosened."
+            )
+    elif cal.get("high", 0) < 0.90:
         notes.append(
-            f"High-confidence accuracy is {cal.get('high', 0):.1%} — below the 90% "
-            "threshold needed for the paper's 'auto-accept' claim. Inspect the "
-            "top disagreement patterns and consider tightening the rules in "
-            "auto_classify.py that gate the `high` verdict."
+            f"High-confidence accuracy is {cal.get('high', 0):.1%} ({cal_n['high']} "
+            "frames) — below the 90% threshold needed for the paper's "
+            "'auto-accept' claim. Inspect the top disagreement patterns and "
+            "consider tightening the rules in auto_classify.py that gate "
+            "the `high` verdict."
         )
 
     # Under-represented
