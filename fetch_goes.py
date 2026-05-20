@@ -38,9 +38,11 @@ CACHE_DIR = PROJECT_ROOT / "goes_cache"
 LABEL_COLS = ["frame_id", "source", "attribute", "value", "value_unit",
               "timestamp", "source_distance_km", "source_distance_s"]
 
-# Calgary site (override via CLI). GOES-19 sees this at ~40° off-nadir.
-DEFAULT_LAT = REDACTED_SITE_LAT
-DEFAULT_LON = REDACTED_SITE_LON
+# Site lat/lon must be provided via --site-lat/--site-lon or the SITE_LAT/
+# SITE_LON env vars. We intentionally don't ship hardcoded defaults — exact
+# coordinates are sensitive (effectively a home address for a backyard rig).
+DEFAULT_LAT = None
+DEFAULT_LON = None
 
 GOES_BUCKET = "noaa-goes19"
 S3_HTTPS_BASE = f"https://{GOES_BUCKET}.s3.amazonaws.com"
@@ -178,14 +180,19 @@ def sample_product(local_nc: Path, var_name: str, lat: float, lon: float):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--datasets", default="dataset_v2_*")
-    ap.add_argument("--site-lat", type=float, default=DEFAULT_LAT)
-    ap.add_argument("--site-lon", type=float, default=DEFAULT_LON)
+    ap.add_argument("--site-lat", type=float,
+                    default=os.environ.get("SITE_LAT", DEFAULT_LAT))
+    ap.add_argument("--site-lon", type=float,
+                    default=os.environ.get("SITE_LON", DEFAULT_LON))
     ap.add_argument("--products", nargs="+", default=list(PRODUCT_CODES.keys()),
                     choices=list(PRODUCT_CODES.keys()))
     ap.add_argument("--match-window-s", type=int, default=600)
     ap.add_argument("--max-scans", type=int, default=0,
                     help="0 = all; otherwise limit per-product for smoke testing")
     args = ap.parse_args()
+
+    if args.site_lat is None or args.site_lon is None:
+        ap.error("--site-lat and --site-lon are required (or set SITE_LAT/SITE_LON env vars)")
 
     print(f"GOES-19 fetcher → products {args.products} at ({args.site_lat:.4f}, {args.site_lon:.4f})")
 

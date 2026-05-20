@@ -1,7 +1,7 @@
 """
 fetch_local_sensors.py — Pull AWNET weather + ESP-derived signals + ephemeris
-from the Postgres production database (10.0.0.227) and emit weak_labels rows
-for every frame in dataset_v2_*.
+from the Postgres production database and emit weak_labels rows for every
+frame in dataset_v2_*.
 
 Each frame ends up with:
   source=weather_station: solarradiation (W/m^2), uv, windspeedmph→ms, winddir, hourlyrainin
@@ -9,9 +9,12 @@ Each frame ends up with:
   source=esp32_sensor:    sky_brightness_mpsas (when present — nighttime only)
   source=derived:         daytime_clear_sky_index when sun_alt > 0
 
+Configure via environment (deploy/.env) or CLI flags:
+  PG_HOST, PG_PORT, PG_DB, PG_USER, PG_PASS
+
 Run:
   python fetch_local_sensors.py
-  python fetch_local_sensors.py --pg-host 10.0.0.227 --pg-pass allsky --site-alt 1080
+  python fetch_local_sensors.py --pg-host 127.0.0.1 --pg-user myuser --pg-pass <secret>
 """
 from __future__ import annotations
 
@@ -84,11 +87,13 @@ def emit_row(rows: list[dict], frame_id: str, source: str, attribute: str,
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--pg-host", default=os.environ.get("PG_HOST", "10.0.0.227"))
+    # Defaults come from env vars (set via deploy/.env) — no hardcoded
+    # site-specific values shipped in source.
+    ap.add_argument("--pg-host", default=os.environ.get("PG_HOST", "127.0.0.1"))
     ap.add_argument("--pg-port", default=int(os.environ.get("PG_PORT", "5432")), type=int)
     ap.add_argument("--pg-db", default=os.environ.get("PG_DB", "cloud_analysis"))
-    ap.add_argument("--pg-user", default=os.environ.get("PG_USER", "allsky"))
-    ap.add_argument("--pg-pass", default=os.environ.get("PG_PASS", "allsky"))
+    ap.add_argument("--pg-user", default=os.environ.get("PG_USER"))
+    ap.add_argument("--pg-pass", default=os.environ.get("PG_PASS"))
     ap.add_argument("--datasets", default="dataset_v2_*")
     ap.add_argument("--start", help="ISO date, default = earliest frame date")
     ap.add_argument("--end", help="ISO date EXCLUSIVE, default = day after latest frame date")
