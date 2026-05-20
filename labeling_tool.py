@@ -35,6 +35,7 @@ CLASS_DESCRIPTIONS = {
     "multi": "Multi-cloud — two or more types in distinct regions",
 }
 CONFIDENCES = ["high", "medium", "low"]
+REGIMES = ["DAY", "TWILIGHT", "NAUTICAL", "ASTRO", "DARK"]
 QC_FLAGS = [
     "sun_artifact",
     "lens_contamination",
@@ -471,6 +472,47 @@ def rgb_v_mean(rgb_path: str, mask_path: str) -> float | None:
     return float(rgb.max(axis=-1)[valid].mean())
 
 
+@st.cache_data(show_spinner=False)
+def compute_matching_ids(
+    frame_ids: tuple[str, ...],
+    auto_csv: str, auto_mtime: float,
+    weak_csv: str, weak_mtime: float,
+    wanted_confidences: frozenset[str] | None,
+    wanted_classes: frozenset[str] | None,
+    wanted_regime: str | None,
+) -> frozenset[str]:
+    """Pre-compute the set of frame_ids passing all active filters in one sweep.
+
+    Pure dict lookups against the already-cached auto/weak label indices —
+    no PIL I/O, no live auto_classify fallback. Cached per (filter combo,
+    csv mtimes) so it survives reruns until either file changes on disk.
+    """
+    auto_index = load_auto_labels(auto_csv, auto_mtime)
+    weak_index = load_weak_labels(weak_csv, weak_mtime) if wanted_regime else {}
+    out: set[str] = set()
+    for fid in frame_ids:
+        row = auto_index.get(fid)
+        if row is None:
+            continue
+        if wanted_confidences is not None and row.get("auto_confidence") not in wanted_confidences:
+            continue
+        if wanted_classes is not None and row.get("auto_class") not in wanted_classes:
+            continue
+        if wanted_regime is not None:
+            wf = weak_index.get(fid, {})
+            sun_alt_row = wf.get(("ephemeris", "sun_alt_deg"))
+            if sun_alt_row is None:
+                continue
+            try:
+                sun_alt = float(sun_alt_row["value"])
+            except (TypeError, ValueError):
+                continue
+            if _sun_regime(sun_alt) != wanted_regime:
+                continue
+        out.add(fid)
+    return frozenset(out)
+
+
 def advance(pairs: list[dict], labeled_ids: set[str], direction: int,
             skip_labeled: bool, review_filter=None) -> int:
     i = st.session_state.idx
@@ -542,6 +584,18 @@ def main() -> None:
                 "confidence=high** validates the high-conf clear predictions."
             ),
         )
+        regime_filter = st.selectbox(
+            "Sun regime",
+            ["any"] + REGIMES,
+            index=0,
+            help=(
+                "Filter by solar regime (from ephemeris.sun_alt_deg). "
+                "**DAY** sun≥6°, **TWILIGHT** −6°..6°, **NAUTICAL** −12°..−6°, "
+                "**ASTRO** −18°..−12°, **DARK** sun<−18°. Useful for batching "
+                "similarly-lit frames — daytime RGB calls vs nighttime mpsas calls "
+                "use very different mental models."
+            ),
+        )
         colormap_name = st.selectbox(
             "Thermal colormap",
             list(COLORMAPS.keys()),
@@ -607,48 +661,48 @@ def main() -> None:
     auto_mtime = AUTO_LABELS_CSV.stat().st_mtime if AUTO_LABELS_CSV.exists() else 0.0
     auto_index = load_auto_labels(str(AUTO_LABELS_CSV), auto_mtime)
 
-    # Translate the two filter dropdowns into sets of acceptable values.
-    wanted_confidences: set[str] | None = None
+    # Translate the dropdowns into frozensets (hashable for cache key).
+    wanted_confidences: frozenset[str] | None = None
     if confidence_filter == "high":
-        wanted_confidences = {"high"}
+        wanted_confidences = frozenset({"high"})
     elif confidence_filter == "medium":
-        wanted_confidences = {"medium"}
+        wanted_confidences = frozenset({"medium"})
     elif confidence_filter == "low":
-        wanted_confidences = {"low"}
+        wanted_confidences = frozenset({"low"})
     elif confidence_filter == "medium+low (active learning)":
-        wanted_confidences = {"medium", "low"}
+        wanted_confidences = frozenset({"medium", "low"})
 
-    wanted_classes: set[str] | None = None
+    wanted_classes: frozenset[str] | None = None
     if class_filter != "any":
-        wanted_classes = {class_filter}
+        wanted_classes = frozenset({class_filter})
+
+    wanted_regime: str | None = None if regime_filter == "any" else regime_filter
 
     review_filter = None
-    if wanted_confidences is not None or wanted_classes is not None:
-        def review_filter(p):
-            row = auto_index.get(p["frame_id"])
-            if row is None:
-                # Fallback: compute live (slow). Only happens if auto_labels.csv
-                # is stale — re-run auto_classify_batch.py to refresh.
-                wf = load_weak_labels(str(WEAK_LABELS_CSV), weak_mtime).get(p["frame_id"], {})
-                mp, _, _ = thermal_cloud_stats(p["mask_path"])
-                nrbr = rgb_nrbr_mean(p["rgb_path"], p["mask_path"])
-                v_mean_live = rgb_v_mean(p["rgb_path"], p["mask_path"])
-                cls, conf, _ = auto_classify(wf, thermal_mean_p=mp,
-                                             rgb_nrbr_mean=nrbr,
-                                             rgb_v_mean=v_mean_live)
-                row = {"auto_class": cls, "auto_confidence": conf}
-            if wanted_confidences is not None and row.get("auto_confidence") not in wanted_confidences:
-                return False
-            if wanted_classes is not None and row.get("auto_class") not in wanted_classes:
-                return False
-            return True
+    any_filter_active = (wanted_confidences is not None or wanted_classes is not None
+                         or wanted_regime is not None)
+    if any_filter_active:
+        # One sweep over the cached auto/weak indices. No PIL I/O, no live
+        # auto_classify fallback — frames missing from auto_labels.csv are
+        # simply excluded (the user is told to re-run auto_classify_batch.py).
+        matching_ids = compute_matching_ids(
+            tuple(p["frame_id"] for p in pairs),
+            str(AUTO_LABELS_CSV), auto_mtime,
+            str(WEAK_LABELS_CSV), weak_mtime,
+            wanted_confidences, wanted_classes, wanted_regime,
+        )
 
-        n_match = sum(1 for p in pairs if review_filter(p))
+        def review_filter(p, _ids=matching_ids):
+            return p["frame_id"] in _ids
+
+        n_match = len(matching_ids)
         filter_desc = []
         if wanted_confidences is not None:
             filter_desc.append(f"conf={','.join(sorted(wanted_confidences))}")
         if wanted_classes is not None:
             filter_desc.append(f"class={','.join(sorted(wanted_classes))}")
+        if wanted_regime is not None:
+            filter_desc.append(f"regime={wanted_regime}")
         st.sidebar.caption(
             f"**Filter ({' · '.join(filter_desc)}): {n_match} of {len(pairs)} frames match** "
             f"({100 * n_match / max(len(pairs), 1):.1f}%)."
