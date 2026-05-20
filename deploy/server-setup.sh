@@ -60,36 +60,53 @@ echo "Python ${PY_VER} ✓"
 echo "Docker $(docker --version | awk '{print $3}' | tr -d ',') ✓"
 
 # ---------- 3. NAS mounts ----------
+# Day-dirs (YYYYMMDD) live one level deep under each mount:
+#   allsky:  ${NAS_ALLSKY_PATH}/images/YYYYMMDD/
+#   thermal: ${NAS_THERMAL_PATH}/${NAS_THERMAL_UUID}/exposures/YYYYMMDD/
 bold "--- NAS mount check ---"
-for path in "${NAS_ALLSKY_PATH}" "${NAS_THERMAL_PATH}"; do
-    if [ ! -d "${path}" ]; then
-        die "NAS path not mounted: ${path}  (mount it via fstab/smb before re-running)"
-    fi
-    N_DAYS=$(ls "${path}" 2>/dev/null | grep -cE '^[0-9]{8}' || true)
-    echo "${path} ✓  (${N_DAYS} day-dirs visible)"
-done
-if [ ! -d "${NAS_THERMAL_PATH}/${NAS_THERMAL_UUID}" ]; then
-    warn "NAS_THERMAL_UUID dir not found inside ${NAS_THERMAL_PATH} — make sure NAS_THERMAL_UUID is correct"
+
+# --- allsky ---
+if [ ! -d "${NAS_ALLSKY_PATH}" ]; then
+    die "NAS path not mounted: ${NAS_ALLSKY_PATH}  (mount via fstab/smb first)"
+fi
+ALLSKY_DAY_DIR="${NAS_ALLSKY_PATH}/images"
+if [ ! -d "${ALLSKY_DAY_DIR}" ]; then
+    warn "${ALLSKY_DAY_DIR} not found — expected layout: ${NAS_ALLSKY_PATH}/images/YYYYMMDD/"
+    warn "If the SMB share is mounted at a deeper level, adjust NAS_ALLSKY_PATH to the parent of 'images/'"
+else
+    N=$(ls "${ALLSKY_DAY_DIR}" 2>/dev/null | grep -cE '^[0-9]{8}$' || true)
+    [ "${N}" -gt 0 ] \
+        && echo "${NAS_ALLSKY_PATH} ✓  (${N} day-dirs in images/)" \
+        || die "${ALLSKY_DAY_DIR} contains 0 YYYYMMDD subdirs — wrong mount or empty share?"
 fi
 
-# ---------- 4. PG connection ----------
-bold "--- PG connection check ---"
-python3 - <<PY
-import sys
-try:
-    import psycopg2
-except ImportError:
-    sys.exit("psycopg2 not installed yet — that's ok, venv setup happens below")
-try:
-    conn = psycopg2.connect(host="${PG_HOST}", port=${PG_PORT}, dbname="${PG_DB}",
-                            user="${PG_USER}", password="${PG_PASS}", connect_timeout=5)
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(*) FROM captures")
-    print(f"PG ✓  ({cur.fetchone()[0]} captures rows)")
-    conn.close()
-except Exception as e:
-    sys.exit(f"PG connection failed: {e}")
-PY
+# --- thermal ---
+if [ ! -d "${NAS_THERMAL_PATH}" ]; then
+    die "NAS path not mounted: ${NAS_THERMAL_PATH}  (mount via fstab/smb first)"
+fi
+THERMAL_DAY_DIR="${NAS_THERMAL_PATH}/${NAS_THERMAL_UUID}/exposures"
+if [ ! -d "${THERMAL_DAY_DIR}" ]; then
+    warn "${THERMAL_DAY_DIR} not found — check NAS_THERMAL_UUID in deploy/.env"
+    warn "Available UUIDs under ${NAS_THERMAL_PATH}:"
+    ls "${NAS_THERMAL_PATH}" 2>/dev/null | sed 's/^/    /'
+else
+    N=$(ls "${THERMAL_DAY_DIR}" 2>/dev/null | grep -cE '^[0-9]{8}$' || true)
+    [ "${N}" -gt 0 ] \
+        && echo "${NAS_THERMAL_PATH} ✓  (${N} day-dirs in ${NAS_THERMAL_UUID}/exposures/)" \
+        || die "${THERMAL_DAY_DIR} contains 0 YYYYMMDD subdirs — wrong UUID or empty share?"
+fi
+
+# ---------- 4. PG port reachability ----------
+# Deep PG check (psycopg2 + actual query) happens after venv setup below,
+# because psycopg2 lives in the venv we're about to create.
+bold "--- PG port check ---"
+if command -v nc >/dev/null; then
+    nc -z "${PG_HOST}" "${PG_PORT}" \
+        && echo "PG port ${PG_HOST}:${PG_PORT} reachable" \
+        || die "PG port ${PG_HOST}:${PG_PORT} unreachable (is the db container up?)"
+else
+    warn "nc not installed — skipping port check; psycopg2 will verify below"
+fi
 
 # ---------- 5. Directories ----------
 bold "--- Creating directories ---"
@@ -107,6 +124,22 @@ fi
     "streamlit>=1.30,<2" "pandas>=2,<3" "numpy>=1.24,<3" "pillow>=10,<12" \
     "opencv-python>=4.8,<5" "psycopg2-binary>=2.9,<3" "netCDF4>=1.6,<2"
 echo "venv ready: $(.venv/bin/python --version | awk '{print $2}')"
+
+# ---------- 6b. Deep PG check (psycopg2 + actual query) ----------
+bold "--- PG connection (psycopg2) ---"
+.venv/bin/python - <<PY || die "PG connection failed — check credentials in deploy/.env"
+import psycopg2, sys
+try:
+    conn = psycopg2.connect(host="${PG_HOST}", port=${PG_PORT}, dbname="${PG_DB}",
+                            user="${PG_USER}", password="${PG_PASS}", connect_timeout=5)
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM captures")
+    print(f"PG ✓  ({cur.fetchone()[0]} captures rows)")
+    conn.close()
+except Exception as e:
+    print(f"PG ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+PY
 
 # ---------- 7. Make cron wrappers executable ----------
 bold "--- Cron wrappers ---"
