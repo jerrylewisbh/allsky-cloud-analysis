@@ -642,6 +642,8 @@ def compute_matching_ids(
     wanted_regimes: frozenset[str] | None,
     wanted_hand_classes: frozenset[str] | None,
     id_substring: str,
+    date_prefix: str | None = None,
+    day_night_mode: str = "any",
 ) -> frozenset[str]:
     """Pre-compute the set of frame_ids passing all active filters in one sweep.
 
@@ -651,11 +653,13 @@ def compute_matching_ids(
     """
     auto_needed = wanted_confidences is not None or wanted_classes is not None
     auto_index = load_auto_labels(auto_csv, auto_mtime) if auto_needed else {}
-    weak_index = load_weak_labels(weak_csv, weak_mtime) if wanted_regimes else {}
+    weak_index = load_weak_labels(weak_csv, weak_mtime) if (wanted_regimes or day_night_mode != "any") else {}
     hand_index = load_hand_labels_index(hand_csv, hand_mtime) if wanted_hand_classes else {}
     sub = id_substring.lower().strip()
     out: set[str] = set()
     for fid in frame_ids:
+        if date_prefix and not fid.startswith(date_prefix):
+            continue
         if sub and sub not in fid.lower():
             continue
         if wanted_hand_classes is not None:
@@ -670,7 +674,9 @@ def compute_matching_ids(
                 continue
             if wanted_classes is not None and row.get("auto_class") not in wanted_classes:
                 continue
-        if wanted_regimes is not None:
+
+        # Sun regime filtering (either via explicit regimes or simple day/night toggle)
+        if wanted_regimes is not None or day_night_mode != "any":
             wf = weak_index.get(fid, {})
             sun_alt_row = wf.get(("ephemeris", "sun_alt_deg"))
             if sun_alt_row is None:
@@ -679,8 +685,15 @@ def compute_matching_ids(
                 sun_alt = float(sun_alt_row["value"])
             except (TypeError, ValueError):
                 continue
-            if _sun_regime(sun_alt) not in wanted_regimes:
+            
+            regime = _sun_regime(sun_alt)
+            if wanted_regimes is not None and regime not in wanted_regimes:
                 continue
+            if day_night_mode == "Day only" and regime != "DAY":
+                continue
+            if day_night_mode == "Night only" and regime == "DAY":
+                continue
+
         out.add(fid)
     return frozenset(out)
 
@@ -734,6 +747,24 @@ def main() -> None:
 
         skip_labeled = st.checkbox("Skip already-labeled", value=True)
         st.markdown("**Filters** — applied with AND")
+
+        # Date filter
+        all_dates = sorted(list(set(p["timestamp"].strftime("%Y%m%d") for p in pairs if p["timestamp"])), reverse=True)
+        date_filter = st.selectbox(
+            "Date",
+            ["any"] + all_dates,
+            index=0,
+            help="Filter by observation date (YYYYMMDD)."
+        )
+
+        # Day/Night filter
+        day_night_filter = st.selectbox(
+            "Day / Night",
+            ["any", "Day only", "Night only"],
+            index=0,
+            help="Quick filter for day vs night. 'Day' = sun > 6°, 'Night' = sun < 6° (includes twilight/dark)."
+        )
+
         confidence_filter = st.selectbox(
             "Auto-label confidence",
             ["any", "high", "medium", "low", "medium+low (active learning)"],
@@ -896,7 +927,7 @@ def main() -> None:
     review_filter = None
     any_filter_active = (wanted_confidences is not None or wanted_classes is not None
                          or wanted_regimes is not None or wanted_hand_classes is not None
-                         or bool(id_substring))
+                         or bool(id_substring) or date_filter != "any" or day_night_filter != "any")
     if any_filter_active:
         # One sweep over the cached auto/weak/hand indices. No PIL I/O, no
         # live auto_classify fallback — frames missing from auto_labels.csv
@@ -908,6 +939,8 @@ def main() -> None:
             str(LABELS_CSV), hand_mtime,
             wanted_confidences, wanted_classes, wanted_regimes,
             wanted_hand_classes, id_substring,
+            date_prefix=(None if date_filter == "any" else date_filter),
+            day_night_mode=day_night_filter,
         )
 
         def review_filter(p, _ids=matching_ids):
@@ -915,6 +948,10 @@ def main() -> None:
 
         n_match = len(matching_ids)
         filter_desc = []
+        if date_filter != "any":
+            filter_desc.append(f"date={date_filter}")
+        if day_night_filter != "any":
+            filter_desc.append(f"mode={day_night_filter}")
         if wanted_confidences is not None:
             filter_desc.append(f"auto_conf={','.join(sorted(wanted_confidences))}")
         if wanted_classes is not None:
