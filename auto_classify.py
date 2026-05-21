@@ -391,7 +391,7 @@ def classify(weak: dict[tuple, dict],
     #    outside the narrow-FOV thermal sensor that the labeler can see in the
     #    full fisheye." When METAR contradicts, fall through to family rules
     #    as low-confidence cloud instead of forcing clear.
-    elif local_scl >= 2 and local_scl > local_cloud_evidence:
+    elif n_sc == 0 and local_scl >= 2 and local_scl > local_cloud_evidence:
         if metar_okta is not None and metar_okta >= 6:
             confident_cloud = False  # fall through to family resolution below
         else:
