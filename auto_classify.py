@@ -92,6 +92,7 @@ def classify(weak: dict[tuple, dict],
     # ---- pull signals ----
     sun_alt = _get(weak, "ephemeris", "sun_alt_deg", as_float=True)
     csi = _get(weak, "derived", "daytime_clear_sky_index", as_float=True)
+    mpsas = _get(weak, "esp32_sensor", "sky_brightness_mpsas", as_float=True)
     lux = _get(weak, "esp32_sensor", "illuminance_lux", as_float=True)
     sky_cond = _get(weak, "esp32_sensor", "sky_condition")  # firmware's own verdict
     humidity = _get(weak, "weather_station", "humidity_pct", as_float=True)
@@ -243,16 +244,24 @@ def classify(weak: dict[tuple, dict],
         votes.append(("csi", v, f"csi={csi:.2f}", True))
 
     is_deep_night = sun_alt is not None and sun_alt < -18.0
-    if is_deep_night and lux is not None:
-        # Urban Calgary at night: clouds reflect city light (higher lux).
-        # Clear sky is very dark (lower lux).
-        if lux > 0.05:
-            v = True
-        elif lux > 0.01:
-            v = None
-        else:
-            v = False
-        votes.append(("lux", v, f"lux={lux:.3f}", True))
+    if is_deep_night:
+        # Hybrid sensor logic: Use Lux if available, otherwise fallback to MPSAS.
+        # Lux is more linear/direct, MPSAS (SQM) is what we had before.
+        night_cloud = False
+        night_clear = False
+        night_weak = False
+
+        if lux is not None:
+            if lux > 0.05: night_cloud = True
+            elif lux < 0.01: night_clear = True
+            else: night_weak = True
+            votes.append(("lux", night_cloud if not night_weak else None, f"lux={lux:.3f}", True))
+        
+        elif mpsas is not None:
+            if mpsas < 17.0: night_cloud = True
+            elif mpsas >= 18.0: night_clear = True
+            else: night_weak = True
+            votes.append(("mpsas", night_cloud if not night_weak else None, f"mpsas={mpsas:.2f}", True))
 
     if metar_okta is not None:
         # BKN/OVC = strong cloud, SCT = weak (could be patchy), FEW/SKC = clear.
@@ -417,18 +426,10 @@ def classify(weak: dict[tuple, dict],
     if goes_height is not None and goes_height > 0:
         if goes_height < 2000:
             family = "low"
-        elif goes_height < 4500:
+        elif goes_height < 6000:
             family = "mid"
-        elif goes_height > 7500:
-            family = "high"
         else:
-            # Fuzzy boundary 4500m - 7500m
-            if goes_phase == "ice" or metar_bucket == "high":
-                family = "high"
-            elif metar_bucket == "mid":
-                family = "mid"
-            else:
-                family = "high" if goes_height >= 6000 else "mid"
+            family = "high"
         family_reason = f"GOES height {goes_height:.0f}m → {family}"
     elif metar_bucket in ("low", "mid", "high"):
         family = metar_bucket
