@@ -658,7 +658,7 @@ def compute_matching_ids(
     sub = id_substring.lower().strip()
     out: set[str] = set()
     for fid in frame_ids:
-        if date_prefix and not fid.startswith(date_prefix):
+        if date_prefix and date_prefix not in fid:
             continue
         if sub and sub not in fid.lower():
             continue
