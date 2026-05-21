@@ -287,12 +287,15 @@ def classify(weak: dict[tuple, dict],
 
     if is_day and rgb_nrbr_mean is not None:
         # Normalized Red-Blue Ratio (R-B)/(R+B):
-        #   ≲ -0.55  = deep blue sky (Strong Clear)
-        #   > -0.35  = visible cloud/haze (Strong Cloud)
-        #   -0.55..-0.35 = Weak Cloud / Haze boundary
-        if rgb_nrbr_mean > -0.35:
+        #   ≲ -0.30  = blue sky (R much less than B)
+        #   ≈ 0      = white (R ≈ B, classic cloud signature)
+        #   > 0      = red-shifted (sunset/smoke/very thin haze near sun)
+        # Captures visible cloud the thermal sensor + firmware miss
+        # (Cu, thin Sc, daytime thin cirrus). Daytime only — RGB at night
+        # carries no cloud signal without sun.
+        if rgb_nrbr_mean > -0.10:
             v = True
-        elif rgb_nrbr_mean < -0.55:
+        elif rgb_nrbr_mean < -0.30:
             v = False
         else:
             v = None
@@ -391,7 +394,7 @@ def classify(weak: dict[tuple, dict],
     #    outside the narrow-FOV thermal sensor that the labeler can see in the
     #    full fisheye." When METAR contradicts, fall through to family rules
     #    as low-confidence cloud instead of forcing clear.
-    elif n_sc == 0 and local_scl >= 2 and local_scl > local_cloud_evidence:
+    elif local_scl >= 2 and local_scl > local_cloud_evidence:
         if metar_okta is not None and metar_okta >= 6:
             confident_cloud = False  # fall through to family resolution below
         else:
