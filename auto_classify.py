@@ -338,37 +338,34 @@ def classify(weak: dict[tuple, dict],
 
     # 1. All-strong-clear with at most one boundary signal.
     if n_sc == 0 and n_w <= 1 and n_scl >= 3:
-        # Override: If GOES explicitly confirms a cloud, do not predict clear.
-        # This prevents 'False Clears' when local sensors (CSI, ESP32) miss scattered Cu/Sc.
         if goes_mask == 1:
-            confident_cloud = False # Fall through to family rules at low confidence
-        else:
-            twilight = sun_alt is not None and -18.0 <= sun_alt < -6.0
-            sig = ", ".join(v[2] for v in strong_clear)
-            weak_note = "" if n_w == 0 else f" (one boundary signal: {weak_cloud[0][2]})"
-            conf = "medium" if twilight else "high"
-            twi_note = " — capped at medium (twilight Ci sensor blind spot)" if twilight else ""
-            return "clear", conf, f"{n_scl} signals strongly clear ({sig}){weak_note}{twi_note}"
+            return "multi", "low", "FOV mismatch: local sensors clear, but GOES sees cloud"
+            
+        twilight = sun_alt is not None and -18.0 <= sun_alt < -6.0
+        sig = ", ".join(v[2] for v in strong_clear)
+        weak_note = "" if n_w == 0 else f" (one boundary signal: {weak_cloud[0][2]})"
+        conf = "medium" if twilight else "high"
+        twi_note = " — capped at medium (twilight Ci sensor blind spot)" if twilight else ""
+        return "clear", conf, f"{n_scl} signals strongly clear ({sig}){weak_note}{twi_note}"
 
     # 2. No signals at all says cloud — but only one signal available.
-    elif n_sc == 0 and n_w == 0:
+    if n_sc == 0 and n_w == 0:
         return "clear", "low", "only one signal available, says clear"
 
     # 3. Weak hints + strong clear majority (and majority is LOCAL):
     #    means clear pocket with thin cloud nearby — predict clear, medium.
     elif n_sc == 0 and local_scl >= 2 and local_scl > local_w * 1.5:
         if goes_mask == 1:
-            confident_cloud = False
-        else:
-            weak_src = [v[0] for v in weak_cloud]
-            sig = ", ".join(v[2] for v in strong_clear if v[3])
-            return "clear", "medium", \
-                   f"local strongly clear ({sig}); weak cloud hints from {weak_src} insufficient"
+             return "multi", "low", "FOV mismatch: local sensors clear, but GOES sees cloud"
+        weak_src = [v[0] for v in weak_cloud]
+        sig = ", ".join(v[2] for v in strong_clear if v[3])
+        return "clear", "medium", \
+               f"local strongly clear ({sig}); weak cloud hints from {weak_src} insufficient"
 
     # 4. Weak cloud signals dominate with no strong cloud:
     #    proceed to family classification at LOW confidence.
     #    This is the new path for "thermal-weak cloud" frames.
-    elif n_sc == 0 and (n_w >= 2 or local_w >= 1):
+    if n_sc == 0 and (n_w >= 2 or local_w >= 1):
         confident_cloud = False
         # Fall through to family rules below
 
@@ -381,13 +378,17 @@ def classify(weak: dict[tuple, dict],
         confident_cloud = (local_scl == 0 and local_sc >= 2)
 
     # 7. Local clear signals dominate — but defer to METAR if it sees regional
-    #    BKN/OVC, or if GOES explicitly confirms a cloud overhead. A clear pocket 
-    #    overhead is plausible, but so is thin/scattered cloud outside the narrow-FOV 
-    #    sensors that the labeler can see. When METAR or GOES contradicts, fall 
-    #    through to family rules as low-confidence cloud instead of forcing clear.
+    #    BKN/OVC. A clear pocket overhead is plausible, but so is "thin cloud
+    #    outside the narrow-FOV thermal sensor that the labeler can see in the
+    #    full fisheye." 
     elif local_scl >= 2 and local_scl > local_cloud_evidence:
-        if (metar_okta is not None and metar_okta >= 6) or goes_mask == 1:
+        if metar_okta is not None and metar_okta >= 6:
             confident_cloud = False  # fall through to family resolution below
+        elif goes_mask == 1:
+            # FOV mismatch: GOES sees a cloud in the 2km pixel, but the narrow-FOV
+            # local sensors (CSI, thermal) see clear sky overhead. The labeler 
+            # likely sees clouds on the horizon of the fisheye.
+            return "multi", "low", "FOV mismatch: local sensors clear, but GOES sees cloud"
         else:
             sig = ", ".join(v[2] for v in strong_clear if v[3])
             return "clear", "medium", \
