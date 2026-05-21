@@ -37,9 +37,9 @@ import cv2
 import numpy as np
 
 # ---- physics thresholds (mirror docs/sky-condition.md and firmware) ----
-ABS_THRESHOLD_C = -5.0       # warmer than this absolute => cloud
-REL_DELTA_C = -10.0          # warmer than (ambient + REL_DELTA) => cloud
-SIGMOID_SIGMA_C = 3.0        # softness of the cloud transition (°C)
+ABS_THRESHOLD_C = -25.0      # warmer than this absolute => cloud
+REL_DELTA_C = -25.0          # warmer than (ambient + REL_DELTA) => cloud
+SIGMOID_SIGMA_C = 8.0        # softness of the cloud transition (°C)
 
 # ---- day / night handling (lux from sensors block) ----
 LUX_NIGHT = 1.0              # below: thermal-only
