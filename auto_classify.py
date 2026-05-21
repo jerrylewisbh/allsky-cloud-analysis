@@ -115,7 +115,14 @@ def classify(weak: dict[tuple, dict],
     # signature that the per-frame vote cascade can't see — the cascade
     # operates on the SCALAR mean. METAR okta then disambiguates Cu (scattered)
     # from broken Sc (more coverage).
-    if (thermal_std is not None and thermal_std > 0.20
+    #
+    # Guard: only fire when GOES height is unknown OR puts the cloud in
+    # low/mid family (<6km). At high family the "texture" is more often
+    # patchy cirrus (Ci) than convective Cu — observed v1: 7 hand-ci
+    # frames got mis-predicted as cu by this rule when GOES top was >6km.
+    high_family_from_goes = (goes_height is not None and goes_height >= 6000)
+    if (not high_family_from_goes
+            and thermal_std is not None and thermal_std > 0.20
             and thermal_mean_p is not None and 0.15 < thermal_mean_p < 0.65):
         texture_note = f"thermal std={thermal_std:.2f} mean={thermal_mean_p:.2f}"
         if is_day:
@@ -160,16 +167,29 @@ def classify(weak: dict[tuple, dict],
     # Thin Ci is below the detection threshold of thermal (cold uniform),
     # mpsas (no skyglow change), CSI (<5% attenuation), and METAR ceiling
     # measurements. But GOES sees a high-altitude ice-phase cloud top
-    # directly. When that combination appears AND METAR isn't separately
-    # reporting BKN/OVC (which would imply different lower cloud) AND there's
-    # no precipitation (which would route to Rule 1 ns_cb above), the
-    # frame is almost certainly thin Ci that locals can't detect.
+    # directly. v1 of this rule produced 23 false-positive ci predictions
+    # across sc/cs_cc/ac_as labels because its guards were vacuously
+    # passing on multi-deck frames where lower cloud was present but
+    # METAR was missing for that frame. Tightened to require POSITIVE
+    # evidence on every condition:
+    #   - GOES ice phase top above 6km
+    #   - GOES cloud mask actually confirms cloud (not phase-noise on a
+    #     clear pixel)
+    #   - METAR is present AND reports SCT or less (okta ≤ 2) — vacuous
+    #     pass on missing METAR was the main source of false positives
+    #   - Thermal sees almost nothing in the narrow FOV (<0.08, was <0.15)
+    #   - CSI shows no significant attenuation (≥0.85) — keeps the
+    #     user-added daytime guard
+    #   - No precipitation (already routed to Rule 1 ns_cb above)
     if (goes_phase == "ice"
             and goes_height is not None and goes_height > 6000
-            and (thermal_mean_p is None or thermal_mean_p < 0.15)
-            and (metar_okta is None or metar_okta <= 4)):
+            and goes_mask == 1
+            and metar_okta is not None and metar_okta <= 2
+            and thermal_mean_p is not None and thermal_mean_p < 0.08
+            and (csi is None or csi >= 0.85)):
         return "ci", "medium", \
-               f"GOES high-ice cloud (top {goes_height:.0f}m) + locally clear/scattered → thin Ci"
+               (f"GOES high-ice cloud (top {goes_height:.0f}m, mask=1) + "
+                f"METAR {metar_okta}/8 + thermal_p={thermal_mean_p:.2f} → thin Ci")
 
     # ---- Rule 3: cloud-presence vote with three-tier semantics ----
     # Each vote: (signal_name, vote, reasoning_fragment, is_local)
@@ -209,7 +229,7 @@ def classify(weak: dict[tuple, dict],
             v = None
         else:
             v = False
-        votes.append(("goes", v, f"goes_mask={goes_mask} phase={goes_phase}", True))
+        votes.append(("goes", v, f"goes_mask={goes_mask} phase={goes_phase}", False))
 
     if is_day and csi is not None:
         # CSI > 1.1 or < 0.7: strong cloud (attenuation or enhancement).
@@ -531,13 +551,28 @@ if __name__ == "__main__":
     print("Frame 5 (cu medium expected — texture):",
           classify(f5, thermal_mean_p=0.40, thermal_std=0.28))
 
-    # Frame 6: locally-clear sky but GOES sees high-ice cloud → thin Ci
+    # Frame 6: locally-clear sky but GOES sees high-ice cloud (mask=1
+    # confirms, METAR scattered, thermal near-zero) → thin Ci
     f6 = {
         ("ephemeris", "sun_alt_deg"): {"value": "30.0"},
         ("weather_station", "rain_1h_mm"): {"value": "0.0"},
+        ("goes19_acmc",  "cloud_present"):       {"value": "1"},
         ("goes19_actpc", "cloud_top_phase"): {"value": "ice"},
         ("goes19_achac", "cloud_top_height_m"): {"value": "8500.0"},
         ("metar", "coverage_okta"): {"value": "2"},
     }
     print("Frame 6 (ci medium expected — high-ice over local-clear):",
           classify(f6, thermal_mean_p=0.03))
+
+    # Frame 7: same GOES high-ice signal BUT no METAR present (vacuous
+    # guard would fire false-positive Ci on this in v1). Tightened rule
+    # should NOT fire — falls through to vote cascade.
+    f7 = {
+        ("ephemeris", "sun_alt_deg"): {"value": "30.0"},
+        ("weather_station", "rain_1h_mm"): {"value": "0.0"},
+        ("goes19_acmc",  "cloud_present"):       {"value": "1"},
+        ("goes19_actpc", "cloud_top_phase"): {"value": "ice"},
+        ("goes19_achac", "cloud_top_height_m"): {"value": "8500.0"},
+    }
+    print("Frame 7 (NOT ci — vacuous METAR guard should not fire):",
+          classify(f7, thermal_mean_p=0.03))
