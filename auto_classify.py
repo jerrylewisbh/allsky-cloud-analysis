@@ -92,9 +92,18 @@ def classify(weak: dict[tuple, dict],
     is_day = sun_alt is not None and sun_alt > 6.0
     is_night = sun_alt is not None and sun_alt < -6.0
 
-    # ---- Rule 1: active precipitation = ns_cb ----
+    # ---- Rule 1: active precipitation suggests ns_cb (but not high-confidence) ----
+    # Observed at this site (2026-05-20 event): the visually-Ns frames LEAD the
+    # AWNET rain measurement by ~25–30 min — the dense overcast moved through
+    # before the gauge caught rain, and the trailing frames where the gauge
+    # measured rain showed thinner/broken Sc with residual precipitation
+    # falling through. So "rain at gauge" and "Ns visible overhead" are not the
+    # same population. The rule still suggests ns_cb (precipitation is the most
+    # actionable single signal) but at medium confidence — the labeler may
+    # legitimately override to sc/multi when the cloud doesn't look the part.
     if rain_mm is not None and rain_mm > 0.5:
-        return "ns_cb", "high", f"rain_1h_mm={rain_mm:.1f} > 0.5"
+        return "ns_cb", "medium", \
+               f"rain_1h_mm={rain_mm:.1f} > 0.5 (visual genus may differ — verify)"
 
     # ---- Rule 2: cloud-presence vote with three-tier semantics ----
     # Each vote: (signal_name, vote, reasoning_fragment, is_local)
@@ -420,7 +429,7 @@ if __name__ == "__main__":
         ("ephemeris", "sun_alt_deg"): {"value": "20.0"},
         ("weather_station", "rain_1h_mm"): {"value": "2.5"},
     }
-    print("Frame 3 (ns_cb expected):", classify(f3))
+    print("Frame 3 (ns_cb medium expected):", classify(f3))
 
     # Edge: no signals
     print("Frame 4 (clear low expected):", classify({}))
