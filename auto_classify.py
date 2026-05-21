@@ -202,20 +202,14 @@ def classify(weak: dict[tuple, dict],
     votes: list[tuple[str, bool | None, str, bool]] = []
 
     if thermal_mean_p is not None:
-        # The MLX90640 only sees the ~110°×75° patch directly overhead, not
-        # the full fisheye view. A "clear" thermal reading means "no cloud
-        # in the center patch" — clouds at the horizon are invisible to it.
-        # So thermal-clear is downgraded to weak when METAR reports regional
-        # BKN/OVC: a clear pocket overhead is plausible, but so is thin cloud
-        # outside the narrow FOV that the labeler can see in the fisheye.
         if thermal_mean_p > 0.4:
             v = True
-        elif thermal_mean_p > 0.2:
-            v = None  # boundary: thermal sees something between noise and cloud
-        elif thermal_mean_p < 0.05:
-            v = False  # extremely confident clear in the center patch
+        elif thermal_mean_p > 0.15:
+            v = None  # boundary: lower threshold for 'weak' cloud
+        elif thermal_mean_p < 0.03:
+            v = False  # more conservative clear floor
         elif metar_okta is not None and metar_okta >= 5:
-            v = None  # narrow-FOV clear contradicted by METAR BKN/OVC → weak
+            v = None
         else:
             v = False
         votes.append(("thermal", v, f"thermal_p={thermal_mean_p:.2f}", True))
@@ -232,10 +226,10 @@ def classify(weak: dict[tuple, dict],
         votes.append(("goes", v, f"goes_mask={goes_mask} phase={goes_phase}", False))
 
     if is_day and csi is not None:
-        # CSI > 1.1 or < 0.7: strong cloud (attenuation or enhancement).
-        # CSI 1.05-1.1 or 0.7-0.85: weak — boundary, common in scattered Cu.
+        # CSI > 1.15 or < 0.65: strong cloud
+        # CSI 1.05-1.15 or 0.65-0.85: weak cloud boundary
         # 0.85-1.05: strong clear.
-        if csi > 1.1 or csi < 0.7:
+        if csi > 1.15 or csi < 0.65:
             v = True
         elif csi > 1.05 or csi < 0.85:
             v = None
@@ -252,8 +246,8 @@ def classify(weak: dict[tuple, dict],
         night_weak = False
 
         if lux is not None:
-            if lux > 0.05: night_cloud = True
-            elif lux < 0.01: night_clear = True
+            if lux > 0.03: night_cloud = True # More sensitive to skyglow
+            elif lux < 0.005: night_clear = True
             else: night_weak = True
             votes.append(("lux", night_cloud if not night_weak else None, f"lux={lux:.3f}", True))
         
@@ -338,31 +332,18 @@ def classify(weak: dict[tuple, dict],
     cloud_evidence       = n_sc  + 0.5 * n_w
     local_cloud_evidence = local_sc + 0.5 * local_w
 
-    # 1. All-strong-clear with at most one boundary signal.
-    #    Requires 3+ strong-clear votes so one weak signal can be dismissed
-    #    as noise. The previous version required zero weak signals, which
-    #    with 6+ sources reporting per frame was essentially unreachable.
-    #
-    #    Regime-aware confidence cap: in NAUTICAL/ASTRO twilight (sun_alt
-    #    −18°..−6°), thin Ci is optically invisible to every physics sensor
-    #    (thermal, mpsas, GOES, METAR can all read "clear") while remaining
-    #    visually obvious to a labeler watching wispy streaks against the
-    #    post-sunset sky. Empirically, of 31 NAUTICAL frames where four
-    #    sensors agreed clear, only ~20% were truly clear — the rest had
-    #    Ci the sensors couldn't see. So we cap the verdict at "medium" in
-    #    twilight. The previous attempt (raising the threshold to n_scl≥4)
-    #    didn't help because the offending frames easily clear that bar —
-    #    the information for thin-Ci-at-twilight simply isn't in the signals.
-    #    "high" is reserved for DAY (sun visible — if it's truly clear,
-    #    GOES + METAR + AWNET all confirm it) and DARK (no twilight Ci
-    #    advantage to the human eye over the sensors).
-    if n_sc == 0 and n_w <= 1 and n_scl >= 3:
+    # 1. All-strong-clear with zero boundary signals.
+    #    Requires 3+ strong-clear votes. Any weak signal demotes to low confidence
+    #    to prevent 'False Clears' on thin clouds.
+    if n_sc == 0 and n_scl >= 3:
         twilight = sun_alt is not None and -18.0 <= sun_alt < -6.0
         sig = ", ".join(v[2] for v in strong_clear)
-        weak_note = "" if n_w == 0 else f" (one boundary signal: {weak_cloud[0][2]})"
-        conf = "medium" if twilight else "high"
-        twi_note = " — capped at medium (twilight Ci sensor blind spot)" if twilight else ""
-        return "clear", conf, f"{n_scl} signals strongly clear ({sig}){weak_note}{twi_note}"
+        if n_w == 0:
+            conf = "medium" if twilight else "high"
+            twi_note = " — capped at medium (twilight Ci sensor blind spot)" if twilight else ""
+            return "clear", conf, f"{n_scl} signals strongly clear ({sig}){twi_note}"
+        else:
+            return "clear", "low", f"{n_scl} signals clear but weak cloud hints present: {[v[2] for v in weak_cloud]}"
 
     # 2. No signals at all says cloud — but only one signal available.
     if n_sc == 0 and n_w == 0:
@@ -426,7 +407,7 @@ def classify(weak: dict[tuple, dict],
     if goes_height is not None and goes_height > 0:
         if goes_height < 2000:
             family = "low"
-        elif goes_height < 6000:
+        elif goes_height < 5000:
             family = "mid"
         else:
             family = "high"
