@@ -281,7 +281,7 @@ def render_context_panel(weak: dict[tuple, dict]) -> None:
     regime = _sun_regime(sun_alt) if sun_alt is not None else "?"
 
     csi = val("derived", "daytime_clear_sky_index")
-    mpsas = val("esp32_sensor", "sky_brightness_mpsas")
+    lux = val("esp32_sensor", "illuminance_lux")
     solar = val("weather_station", "solar_irradiance_wm2")
     humidity = val("weather_station", "humidity_pct")
     pressure = val("weather_station", "pressure_hpa")
@@ -304,8 +304,8 @@ def render_context_panel(weak: dict[tuple, dict]) -> None:
                                 help="Clear-Sky Index from AWNET solarradiation vs Haurwitz clear-sky model")
         headline_cols[2].metric("Solar W/m²", f"{solar:.0f}" if solar is not None else "—")
     else:
-        headline_cols[1].metric("mpsas (lower=brighter)", f"{mpsas:.2f}" if mpsas is not None else "—",
-                                help="ESP SQM — clouds over Calgary reflect city skyglow back, lowering mpsas")
+        headline_cols[1].metric("Lux (higher=cloudier)", f"{lux:.3f}" if lux is not None else "—",
+                                help="ESP Lux — clouds over Calgary reflect city skyglow back, increasing lux")
         headline_cols[2].metric("Moon", f"{moon_alt:.0f}°  {moon_phase:.0f}%" if moon_alt is not None else "—",
                                 help="moon altitude · phase. Below horizon = dark; above = scattered moonlight changes RGB")
 
@@ -335,7 +335,7 @@ def render_context_panel(weak: dict[tuple, dict]) -> None:
     elif regime in ("TWILIGHT", "NAUTICAL"):
         regime_note = "Twilight: both RGB and thermal carry info but neither is fully reliable. Cross-check with METAR genus hint."
     else:
-        regime_note = "Nighttime: RGB is moonless or marginal — trust thermal + mpsas. Cu/Sc invisible without moonlight."
+        regime_note = "Nighttime: RGB is moonless or marginal — trust thermal + lux. Cu/Sc invisible without moonlight."
     st.caption(f"**{regime_note}**  ·  METAR sees the whole hemisphere from the airport; your crop is a ~75° patch — disagreement is expected.")
 
     # Expandable details

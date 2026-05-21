@@ -92,7 +92,7 @@ def classify(weak: dict[tuple, dict],
     # ---- pull signals ----
     sun_alt = _get(weak, "ephemeris", "sun_alt_deg", as_float=True)
     csi = _get(weak, "derived", "daytime_clear_sky_index", as_float=True)
-    mpsas = _get(weak, "esp32_sensor", "sky_brightness_mpsas", as_float=True)
+    lux = _get(weak, "esp32_sensor", "illuminance_lux", as_float=True)
     sky_cond = _get(weak, "esp32_sensor", "sky_condition")  # firmware's own verdict
     humidity = _get(weak, "weather_station", "humidity_pct", as_float=True)
     rain_mm = _get(weak, "weather_station", "rain_1h_mm", as_float=True)
@@ -123,7 +123,7 @@ def classify(weak: dict[tuple, dict],
     high_family_from_goes = (goes_height is not None and goes_height >= 6000)
     if (not high_family_from_goes
             and thermal_std is not None and thermal_std > 0.20
-            and thermal_mean_p is not None and 0.15 < thermal_mean_p < 0.65):
+            and thermal_mean_p is not None and 0.05 < thermal_mean_p < 0.65):
         texture_note = f"thermal std={thermal_std:.2f} mean={thermal_mean_p:.2f}"
         if is_day:
             if metar_okta is not None and metar_okta >= 5:
@@ -185,8 +185,7 @@ def classify(weak: dict[tuple, dict],
             and goes_height is not None and goes_height > 6000
             and goes_mask == 1
             and metar_okta is not None and metar_okta <= 3
-            and thermal_mean_p is not None and thermal_mean_p < 0.10
-            and (csi is None or csi >= 0.85)):
+            and thermal_mean_p is not None and thermal_mean_p < 0.15):
         return "ci", "medium", \
                (f"GOES high-ice cloud (top {goes_height:.0f}m, mask=1) + "
                 f"METAR {metar_okta}/8 + thermal_p={thermal_mean_p:.2f} → thin Ci")
@@ -243,15 +242,17 @@ def classify(weak: dict[tuple, dict],
             v = False
         votes.append(("csi", v, f"csi={csi:.2f}", True))
 
-    if is_night and mpsas is not None:
-        # Urban Calgary: <17 strong cloud, 17-18 boundary, ≥18 clear.
-        if mpsas < 17.0:
+    is_deep_night = sun_alt is not None and sun_alt < -18.0
+    if is_deep_night and lux is not None:
+        # Urban Calgary at night: clouds reflect city light (higher lux).
+        # Clear sky is very dark (lower lux).
+        if lux > 0.05:
             v = True
-        elif mpsas < 18.0:
+        elif lux > 0.01:
             v = None
         else:
             v = False
-        votes.append(("mpsas", v, f"mpsas={mpsas:.2f}", True))
+        votes.append(("lux", v, f"lux={lux:.3f}", True))
 
     if metar_okta is not None:
         # BKN/OVC = strong cloud, SCT = weak (could be patchy), FEW/SKC = clear.
@@ -416,10 +417,18 @@ def classify(weak: dict[tuple, dict],
     if goes_height is not None and goes_height > 0:
         if goes_height < 2000:
             family = "low"
-        elif goes_height < 6000:
+        elif goes_height < 4500:
             family = "mid"
-        else:
+        elif goes_height > 7500:
             family = "high"
+        else:
+            # Fuzzy boundary 4500m - 7500m
+            if goes_phase == "ice" or metar_bucket == "high":
+                family = "high"
+            elif metar_bucket == "mid":
+                family = "mid"
+            else:
+                family = "high" if goes_height >= 6000 else "mid"
         family_reason = f"GOES height {goes_height:.0f}m → {family}"
     elif metar_bucket in ("low", "mid", "high"):
         family = metar_bucket
