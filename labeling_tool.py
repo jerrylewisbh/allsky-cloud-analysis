@@ -578,16 +578,24 @@ def make_overlay(rgb_path: str, mask_path: str,
     return overlay.clip(0, 255).astype(np.uint8)
 
 
-def thermal_cloud_stats(mask_path: str) -> tuple[float, float, float]:
-    """Returns (mean_cloud_prob_over_valid, fraction_above_0.5_over_valid, no_data_fraction)."""
+def thermal_cloud_stats(mask_path: str) -> tuple[float, float, float, float]:
+    """Returns (mean_cloud_prob_over_valid, fraction_above_0.5_over_valid,
+    no_data_fraction, std_cloud_prob_over_valid).
+
+    The std is the spatial standard deviation — used by the auto-classifier's
+    Rule 0 to detect broken/textured cloud regimes (Cu, broken Sc) that the
+    scalar mean alone misses.
+    """
     raw = np.array(Image.open(mask_path).convert("L"))
     if raw.max() <= 1 or len(np.unique(raw)) <= 2:
-        return float((raw > 127).mean()), float((raw > 127).mean()), 0.0
+        binary = (raw > 127).astype(np.float32)
+        return float(binary.mean()), float(binary.mean()), 0.0, float(binary.std())
     valid = raw != NO_DATA_VALUE
     if not valid.any():
-        return float("nan"), float("nan"), 1.0
+        return float("nan"), float("nan"), 1.0, float("nan")
     probs = raw[valid].astype(np.float32) / 254.0
-    return float(probs.mean()), float((probs >= 0.5).mean()), float((~valid).mean())
+    return (float(probs.mean()), float((probs >= 0.5).mean()),
+            float((~valid).mean()), float(probs.std()))
 
 
 def _rgb_and_valid(rgb_path: str, mask_path: str):
@@ -930,7 +938,7 @@ def main() -> None:
     pair = pairs[st.session_state.idx]
     ts = pair["timestamp"]
     ts_str = ts.strftime("%Y-%m-%d %H:%M:%S UTC") if ts else "(no timestamp)"
-    mean_p, frac_50, nodata_frac = thermal_cloud_stats(pair["mask_path"])
+    mean_p, frac_50, nodata_frac, std_p = thermal_cloud_stats(pair["mask_path"])
 
     # Compute auto-label using all weak labels + local thermal + RGB NRBR (day) + RGB V (night)
     # (weak_mtime hoisted above the sidebar so the review filter can use it too)
@@ -940,6 +948,7 @@ def main() -> None:
     auto_label, auto_conf, auto_reason = auto_classify(
         weak_for_frame, thermal_mean_p=mean_p,
         rgb_nrbr_mean=nrbr, rgb_v_mean=v_mean,
+        thermal_std=std_p,
     )
 
     st.subheader(f"{pair['frame_id']}  ·  {ts_str}")

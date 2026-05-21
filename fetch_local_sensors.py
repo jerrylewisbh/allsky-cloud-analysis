@@ -19,11 +19,13 @@ Run:
 from __future__ import annotations
 
 import argparse
+import bisect
 import csv
 import datetime as dt
 import math
 import os
 import re
+import statistics
 from pathlib import Path
 
 import psycopg2
@@ -128,10 +130,46 @@ def main():
     conn.close()
     print(f"Got {len(rows_db)} capture rows from PG")
 
+    # Pre-pass: build a CSI timeline across ALL captures (not just dataset
+    # frames), so we have neighbors for the windowed variance even at the
+    # ends of the dataset. CSI variance over a ±5 min window discriminates
+    # convective (Cu — clouds pass intermittently, high variance) from
+    # stratiform (Sc/St — steady attenuation, low variance). Established
+    # solar-forecasting technique (Reno 2013, Stein 2012).
+    csi_timeline: list[tuple[dt.datetime, float]] = []
+    for r in rows_db:
+        ts_r = r["timestamp"]
+        if ts_r.tzinfo is None:
+            ts_r = ts_r.replace(tzinfo=dt.timezone.utc)
+        try:
+            sun_alt_r = float(r["sun_alt"] or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if sun_alt_r <= 0:
+            continue
+        awnet_r = r["awnet"] or {}
+        solar = awnet_r.get("solarradiation")
+        if solar is None or solar == "":
+            continue
+        try:
+            ghi_cs = haurwitz_clear_sky_ghi(sun_alt_r)
+            if ghi_cs <= 50.0:
+                continue
+            csi_val = max(0.0, min(float(solar) / ghi_cs, 1.2))
+            csi_timeline.append((ts_r, csi_val))
+        except (TypeError, ValueError):
+            continue
+    csi_timeline.sort()
+    csi_timestamps = [t for t, _ in csi_timeline]
+    csi_values_only = [c for _, c in csi_timeline]
+    csi_window = dt.timedelta(minutes=5)
+    print(f"CSI timeline: {len(csi_timeline)} valid samples for variance computation")
+
     rows: list[dict] = []
     matched = 0
     daytime = 0
     nighttime = 0
+    csi_std_emitted = 0
 
     for r in rows_db:
         path = r["allsky_path"] or ""
@@ -220,8 +258,21 @@ def main():
                                  csi, "ratio", ts, 0.0, 0)
                         daytime += 1
 
+                        # CSI variance over ±5 min — discriminates convective
+                        # (Cu, high variance) from stratiform (Sc/St, low).
+                        # Needs ≥3 samples in the window for a meaningful std.
+                        lo = bisect.bisect_left(csi_timestamps, ts - csi_window)
+                        hi = bisect.bisect_right(csi_timestamps, ts + csi_window)
+                        nearby = csi_values_only[lo:hi]
+                        if len(nearby) >= 3:
+                            csi_std = statistics.pstdev(nearby)
+                            emit_row(rows, frame_id, "derived", "csi_std_10min",
+                                     csi_std, "ratio", ts, 0.0, 0)
+                            csi_std_emitted += 1
+
     print(f"Matched {matched}/{len(frame_ids)} dataset frames")
     print(f"  Daytime frames with CSI computed: {daytime}")
+    print(f"  Daytime frames with CSI 10-min std: {csi_std_emitted}")
     print(f"  Nighttime frames with mpsas recorded: {nighttime}")
 
     # Merge into existing weak_labels.csv (dedup by composite key)

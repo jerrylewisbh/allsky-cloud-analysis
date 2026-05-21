@@ -12,16 +12,22 @@ fundamentally require RGB texture analysis.
 
 Decision logic (see docs/weak-labels-reference.md §"How to combine signals"):
 
-  1. Precipitation OR strong CB hint → ns_cb (high)
-  2. Vote across thermal_mean_p, GOES mask, daytime CSI, nighttime mpsas, METAR okta:
-       - all signals agree clear → clear (high)
-       - all signals agree cloud → continue to family (high)
-       - local-overhead signals dominate → trust them, regional disagrees → multi (low)
-  3. Family from GOES height (preferred) or METAR altitude_bucket
-  4. Genus within family:
-       - high → cs_cc (low, needs RGB)  [Ci is morphologically distinct]
+  0. Thermal spatial variance (broken-cloud texture) → cu / sc / ac_as (medium)
+  1. Precipitation + (optional 4-AND CB signature) → ns_cb (medium or high)
+  2. GOES high-ice cloud + locally clear + no rain → ci (medium)  [targeted Ci]
+  3. Vote across thermal_mean_p, GOES mask, CSI, mpsas, METAR okta, sky_cond,
+     rgb_nrbr (day), rgb_v_night (night):
+       - all signals agree clear → clear (high, capped at medium in twilight)
+       - all signals agree cloud → continue to family (medium)
+       - local-overhead signals dominate → trust them unless METAR>=6 → multi
+  4. METAR CB genus + confident cloud + GOES ice top → ns_cb (medium)
+  5. Family from GOES height (preferred) or METAR altitude_bucket
+  6. Genus within family:
+       - high + night + low thermal → ci (medium); else cs_cc (low, needs RGB)
        - mid  → ac_as (medium)
-       - low  → st if humidity > 90 (medium), else sc (low, needs RGB)
+       - low  → st if humidity > 90 (medium)
+              → cu if METAR genus CU/TCU OR CSI variance high (medium)
+              → sc (low) otherwise [needs RGB texture]
        - missing family → multi (low)
 
 Confidence semantics:
@@ -55,7 +61,8 @@ def _get(weak: dict, source: str, attr: str,
 def classify(weak: dict[tuple, dict],
              thermal_mean_p: Optional[float] = None,
              rgb_nrbr_mean: Optional[float] = None,
-             rgb_v_mean: Optional[float] = None) -> tuple[str, str, str]:
+             rgb_v_mean: Optional[float] = None,
+             thermal_std: Optional[float] = None) -> tuple[str, str, str]:
     """Returns (class, confidence, reasoning).
 
     Parameters
@@ -74,6 +81,13 @@ def classify(weak: dict[tuple, dict],
         Calgary city skyglow and appears brighter than dark clear sky. Noisy
         because of exposure variation + moon, but catches some thin nighttime
         cloud the multimodal physics sensors all miss. Nighttime only.
+    thermal_std : float, optional
+        Spatial standard deviation of cloud probability across valid mask
+        pixels. Discriminates clouds with internal structure (Cu fragments
+        with blue gaps → high std; broken Ac/Sc → mid std) from uniform
+        sky (clear → low std; overcast Sc/St → low std). High std + mid
+        mean is a textbook convective Cu signature regardless of what the
+        vote cascade says about overall cloud presence.
     """
     # ---- pull signals ----
     sun_alt = _get(weak, "ephemeris", "sun_alt_deg", as_float=True)
@@ -91,21 +105,73 @@ def classify(weak: dict[tuple, dict],
 
     is_day = sun_alt is not None and sun_alt > 6.0
     is_night = sun_alt is not None and sun_alt < -6.0
+    csi_std = _get(weak, "derived", "csi_std_10min", as_float=True)
 
-    # ---- Rule 1: active precipitation suggests ns_cb (but not high-confidence) ----
+    # ---- Rule 0: thermal spatial-variance texture (overrides clear cascade) ----
+    # Clear sky and overcast sheets both have low spatial std in the thermal
+    # mask (uniform cold / uniform warm). High std means warm puffs against
+    # cold gaps, i.e. discrete cloud elements (Cu fragments, broken Sc/Ac).
+    # Combined with a mid-range mean, this is a confident "broken-cloud"
+    # signature that the per-frame vote cascade can't see — the cascade
+    # operates on the SCALAR mean. METAR okta then disambiguates Cu (scattered)
+    # from broken Sc (more coverage).
+    if (thermal_std is not None and thermal_std > 0.20
+            and thermal_mean_p is not None and 0.15 < thermal_mean_p < 0.65):
+        texture_note = f"thermal std={thermal_std:.2f} mean={thermal_mean_p:.2f}"
+        if is_day:
+            if metar_okta is not None and metar_okta >= 5:
+                return "sc", "medium", \
+                       f"daytime broken-cloud texture ({texture_note}) + METAR {metar_okta}/8 → broken Sc"
+            return "cu", "medium", \
+                   f"daytime broken-cloud texture ({texture_note}) → Cu over blue gaps"
+        if is_night:
+            return "ac_as", "medium", \
+                   f"night broken-cloud texture ({texture_note}) → Ac/broken Sc"
+        # twilight: ambiguous, fall through to vote cascade
+
+    # ---- Rule 1: active precipitation suggests ns_cb ----
     # Observed at this site (2026-05-20 event): the visually-Ns frames LEAD the
     # AWNET rain measurement by ~25–30 min — the dense overcast moved through
     # before the gauge caught rain, and the trailing frames where the gauge
     # measured rain showed thinner/broken Sc with residual precipitation
     # falling through. So "rain at gauge" and "Ns visible overhead" are not the
-    # same population. The rule still suggests ns_cb (precipitation is the most
-    # actionable single signal) but at medium confidence — the labeler may
-    # legitimately override to sc/multi when the cloud doesn't look the part.
+    # same population. Default is medium confidence so the labeler can override
+    # to sc/multi when the cloud doesn't look the part.
+    #
+    # Promotion to "high" requires a 4-AND deep-convective signature:
+    # GOES ice phase + cloud top above 6km + saturated surface air. That
+    # combination is specific to Cb / strong-frontal-Ns events where the
+    # visual genus and the rain measurement align well.
+    #
+    # Fires BEFORE Rule 2 (high-ice Ci) so thunderstorm frames don't get
+    # mis-routed to Ci just because they also have a high ice top.
     if rain_mm is not None and rain_mm > 0.5:
+        cb_signature = (goes_phase == "ice"
+                        and goes_height is not None and goes_height > 6000
+                        and humidity is not None and humidity > 90)
+        if cb_signature:
+            return "ns_cb", "high", \
+                   (f"rain {rain_mm:.1f}mm + GOES ice top {goes_height:.0f}m + "
+                    f"humidity {humidity:.0f}% → deep convective ns_cb")
         return "ns_cb", "medium", \
                f"rain_1h_mm={rain_mm:.1f} > 0.5 (visual genus may differ — verify)"
 
-    # ---- Rule 2: cloud-presence vote with three-tier semantics ----
+    # ---- Rule 2: targeted high-ice Ci (locals can't see thin cirrus) ----
+    # Thin Ci is below the detection threshold of thermal (cold uniform),
+    # mpsas (no skyglow change), CSI (<5% attenuation), and METAR ceiling
+    # measurements. But GOES sees a high-altitude ice-phase cloud top
+    # directly. When that combination appears AND METAR isn't separately
+    # reporting BKN/OVC (which would imply different lower cloud) AND there's
+    # no precipitation (which would route to Rule 1 ns_cb above), the
+    # frame is almost certainly thin Ci that locals can't detect.
+    if (goes_phase == "ice"
+            and goes_height is not None and goes_height > 6000
+            and (thermal_mean_p is None or thermal_mean_p < 0.15)
+            and (metar_okta is None or metar_okta <= 4)):
+        return "ci", "medium", \
+               f"GOES high-ice cloud (top {goes_height:.0f}m) + locally clear/scattered → thin Ci"
+
+    # ---- Rule 3: cloud-presence vote with three-tier semantics ----
     # Each vote: (signal_name, vote, reasoning_fragment, is_local)
     #   vote == True  → strong cloud
     #   vote == False → strong clear
@@ -314,7 +380,7 @@ def classify(weak: dict[tuple, dict],
         cr_src = [v[0] for v in strong_clear]
         return "multi", "low", f"signals split cloud={cl_src} clear={cr_src}"
 
-    # ---- Rule 3: deep convection (CB) ----
+    # ---- Rule 4: deep convection (CB) via METAR genus ----
     cb_in_metar = metar_genus in ("CB", "TCU")
     cb_signals_strong = (cb_in_metar
                          and confident_cloud
@@ -324,7 +390,7 @@ def classify(weak: dict[tuple, dict],
         return "ns_cb", "medium", \
                f"METAR {metar_genus} + GOES {goes_phase} top {goes_height:.0f}m"
 
-    # ---- Rule 4: family from GOES height (preferred) or METAR ----
+    # ---- Rule 5: family from GOES height (preferred) or METAR ----
     family = None
     family_reason = ""
     if goes_height is not None and goes_height > 0:
@@ -349,7 +415,7 @@ def classify(weak: dict[tuple, dict],
     if cb_in_metar:
         reasoning_bits.append(f"METAR genus={metar_genus}")
 
-    # ---- Rule 5: genus within family ----
+    # ---- Rule 6: genus within family ----
     if family == "high":
         # Ci (thin streaks) vs Cs (sheet) vs Cc (ripples) need RGB texture in
         # general, but there's one regime where physics decides: at night,
@@ -371,11 +437,20 @@ def classify(weak: dict[tuple, dict],
             return "st", "medium", "; ".join(
                 reasoning_bits + [f"humidity {humidity:.0f}% suggests St/fog"])
         # Cumulus is convective (daytime) and discontinuous (METAR not OVC,
-        # CSI showing intermittent shading rather than steady attenuation).
-        # METAR genus hint is the most direct signal when available.
+        # CSI temporally noisy rather than steady, sometimes spatially noisy
+        # in the thermal mask). Signals in priority order:
+        #   1. METAR genus CU/TCU (rare at YYC, but unambiguous when it fires)
+        #   2. CSI 10-min std > 0.10 (passing clouds intermittently shade the
+        #      pyranometer — the *variance* of CSI is a better convective
+        #      signal than the *value*, which only catches steady attenuation)
+        #   3. Daytime + scattered METAR okta + CSI in scattered range
+        #      (legacy fallback when csi_std weak label isn't populated yet)
         if metar_genus in ("CU", "TCU"):
             return "cu", "medium", "; ".join(
                 reasoning_bits + [f"METAR genus {metar_genus}"])
+        if is_day and csi_std is not None and csi_std > 0.10:
+            return "cu", "medium", "; ".join(reasoning_bits + [
+                f"day + CSI 10-min std={csi_std:.2f} (convective shading) → Cu"])
         if (is_day and metar_okta is not None and 1 <= metar_okta <= 4
                 and csi is not None and 0.55 <= csi <= 1.05):
             return "cu", "low", "; ".join(reasoning_bits + [
@@ -424,12 +499,45 @@ if __name__ == "__main__":
     }
     print("Frame 2 (sc low expected — METAR override):", classify(f2, thermal_mean_p=0.01))
 
-    # Edge: a raining frame (should short-circuit to ns_cb)
+    # Edge: a raining frame without deep-convective signature → ns_cb medium
     f3 = {
         ("ephemeris", "sun_alt_deg"): {"value": "20.0"},
         ("weather_station", "rain_1h_mm"): {"value": "2.5"},
     }
     print("Frame 3 (ns_cb medium expected):", classify(f3))
 
+    # Edge: a raining frame WITH deep-convective signature → ns_cb high
+    f3b = {
+        ("ephemeris", "sun_alt_deg"): {"value": "20.0"},
+        ("weather_station", "rain_1h_mm"): {"value": "5.0"},
+        ("weather_station", "humidity_pct"): {"value": "95.0"},
+        ("goes19_actpc", "cloud_top_phase"): {"value": "ice"},
+        ("goes19_achac", "cloud_top_height_m"): {"value": "9500.0"},
+    }
+    print("Frame 3b (ns_cb high expected — 4-AND CB signature):", classify(f3b))
+
     # Edge: no signals
     print("Frame 4 (clear low expected):", classify({}))
+
+    # Frame 5: broken Cu signature — daytime + high thermal spatial variance
+    # against a mid-range mean. Should fire Rule 0 → cu medium regardless of
+    # what the vote cascade would have said.
+    f5 = {
+        ("ephemeris", "sun_alt_deg"): {"value": "45.0"},
+        ("weather_station", "humidity_pct"): {"value": "35.0"},
+        ("weather_station", "rain_1h_mm"): {"value": "0.0"},
+        ("metar", "coverage_okta"): {"value": "3"},
+    }
+    print("Frame 5 (cu medium expected — texture):",
+          classify(f5, thermal_mean_p=0.40, thermal_std=0.28))
+
+    # Frame 6: locally-clear sky but GOES sees high-ice cloud → thin Ci
+    f6 = {
+        ("ephemeris", "sun_alt_deg"): {"value": "30.0"},
+        ("weather_station", "rain_1h_mm"): {"value": "0.0"},
+        ("goes19_actpc", "cloud_top_phase"): {"value": "ice"},
+        ("goes19_achac", "cloud_top_height_m"): {"value": "8500.0"},
+        ("metar", "coverage_okta"): {"value": "2"},
+    }
+    print("Frame 6 (ci medium expected — high-ice over local-clear):",
+          classify(f6, thermal_mean_p=0.03))

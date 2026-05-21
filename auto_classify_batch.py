@@ -32,12 +32,30 @@ AUTO_LABELS_CSV = PROJECT_ROOT / "labels" / "auto_labels.csv"
 
 
 def thermal_mean(mask_path: Path) -> float | None:
+    """Mean cloud probability over valid pixels. Backward-compatible — kept
+    as a thin wrapper around thermal_stats() so older callers still work."""
+    m, _ = thermal_stats(mask_path)
+    return m
+
+
+def thermal_stats(mask_path: Path) -> tuple[float | None, float | None]:
+    """Returns (mean, std) of cloud probability over valid pixels.
+
+    The std measures spatial variance — a textbook discriminator between:
+      - uniform sky (clear or overcast Sc/St): low std
+      - convective / broken cloud (Cu, broken Ac, fragmented Sc): high std
+
+    This is the single most useful feature for separating Cu from clear,
+    which the per-frame vote cascade cannot do (it operates on the scalar
+    mean only). Computing std is essentially free since the mask is already
+    loaded for the mean.
+    """
     raw = np.array(Image.open(mask_path).convert("L"))
     valid = raw != 255
     if not valid.any():
-        return None
+        return None, None
     probs = raw[valid].astype(np.float32) / 254.0
-    return float(probs.mean())
+    return float(probs.mean()), float(probs.std())
 
 
 def _rgb_and_valid(rgb_path: Path, mask_path: Path):
@@ -121,19 +139,21 @@ def main():
     dist = Counter()
     conf_dist = Counter()
     for i, (fid, mask_path, rgb_path) in enumerate(frames):
-        mp = thermal_mean(Path(mask_path))
+        mp, mstd = thermal_stats(Path(mask_path))
         nrbr = rgb_nrbr_in_valid_region(Path(rgb_path), Path(mask_path))
         v_mean = rgb_v_mean_in_valid_region(Path(rgb_path), Path(mask_path))
         wf = weak.get(fid, {})
         cls, conf, reasoning = classify(wf, thermal_mean_p=mp,
                                          rgb_nrbr_mean=nrbr,
-                                         rgb_v_mean=v_mean)
+                                         rgb_v_mean=v_mean,
+                                         thermal_std=mstd)
         rows.append({
             "frame_id": fid,
             "auto_class": cls,
             "auto_confidence": conf,
             "auto_reasoning": reasoning,
             "thermal_mean_p": f"{mp:.3f}" if mp is not None else "",
+            "thermal_std": f"{mstd:.3f}" if mstd is not None else "",
             "rgb_nrbr": f"{nrbr:+.3f}" if nrbr is not None else "",
             "rgb_v_mean": f"{v_mean:.1f}" if v_mean is not None else "",
             "computed_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
