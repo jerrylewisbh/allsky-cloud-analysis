@@ -337,47 +337,38 @@ def classify(weak: dict[tuple, dict],
     local_cloud_evidence = local_sc + 0.5 * local_w
 
     # 1. All-strong-clear with at most one boundary signal.
-    #    Requires 3+ strong-clear votes so one weak signal can be dismissed
-    #    as noise. The previous version required zero weak signals, which
-    #    with 6+ sources reporting per frame was essentially unreachable.
-    #
-    #    Regime-aware confidence cap: in NAUTICAL/ASTRO twilight (sun_alt
-    #    −18°..−6°), thin Ci is optically invisible to every physics sensor
-    #    (thermal, mpsas, GOES, METAR can all read "clear") while remaining
-    #    visually obvious to a labeler watching wispy streaks against the
-    #    post-sunset sky. Empirically, of 31 NAUTICAL frames where four
-    #    sensors agreed clear, only ~20% were truly clear — the rest had
-    #    Ci the sensors couldn't see. So we cap the verdict at "medium" in
-    #    twilight. The previous attempt (raising the threshold to n_scl≥4)
-    #    didn't help because the offending frames easily clear that bar —
-    #    the information for thin-Ci-at-twilight simply isn't in the signals.
-    #    "high" is reserved for DAY (sun visible — if it's truly clear,
-    #    GOES + METAR + AWNET all confirm it) and DARK (no twilight Ci
-    #    advantage to the human eye over the sensors).
     if n_sc == 0 and n_w <= 1 and n_scl >= 3:
-        twilight = sun_alt is not None and -18.0 <= sun_alt < -6.0
-        sig = ", ".join(v[2] for v in strong_clear)
-        weak_note = "" if n_w == 0 else f" (one boundary signal: {weak_cloud[0][2]})"
-        conf = "medium" if twilight else "high"
-        twi_note = " — capped at medium (twilight Ci sensor blind spot)" if twilight else ""
-        return "clear", conf, f"{n_scl} signals strongly clear ({sig}){weak_note}{twi_note}"
+        # Override: If GOES explicitly confirms a cloud, do not predict clear.
+        # This prevents 'False Clears' when local sensors (CSI, ESP32) miss scattered Cu/Sc.
+        if goes_mask == 1:
+            confident_cloud = False # Fall through to family rules at low confidence
+        else:
+            twilight = sun_alt is not None and -18.0 <= sun_alt < -6.0
+            sig = ", ".join(v[2] for v in strong_clear)
+            weak_note = "" if n_w == 0 else f" (one boundary signal: {weak_cloud[0][2]})"
+            conf = "medium" if twilight else "high"
+            twi_note = " — capped at medium (twilight Ci sensor blind spot)" if twilight else ""
+            return "clear", conf, f"{n_scl} signals strongly clear ({sig}){weak_note}{twi_note}"
 
     # 2. No signals at all says cloud — but only one signal available.
-    if n_sc == 0 and n_w == 0:
+    elif n_sc == 0 and n_w == 0:
         return "clear", "low", "only one signal available, says clear"
 
     # 3. Weak hints + strong clear majority (and majority is LOCAL):
     #    means clear pocket with thin cloud nearby — predict clear, medium.
-    if n_sc == 0 and local_scl >= 2 and local_scl > local_w * 1.5:
-        weak_src = [v[0] for v in weak_cloud]
-        sig = ", ".join(v[2] for v in strong_clear if v[3])
-        return "clear", "medium", \
-               f"local strongly clear ({sig}); weak cloud hints from {weak_src} insufficient"
+    elif n_sc == 0 and local_scl >= 2 and local_scl > local_w * 1.5:
+        if goes_mask == 1:
+            confident_cloud = False
+        else:
+            weak_src = [v[0] for v in weak_cloud]
+            sig = ", ".join(v[2] for v in strong_clear if v[3])
+            return "clear", "medium", \
+                   f"local strongly clear ({sig}); weak cloud hints from {weak_src} insufficient"
 
     # 4. Weak cloud signals dominate with no strong cloud:
     #    proceed to family classification at LOW confidence.
     #    This is the new path for "thermal-weak cloud" frames.
-    if n_sc == 0 and (n_w >= 2 or local_w >= 1):
+    elif n_sc == 0 and (n_w >= 2 or local_w >= 1):
         confident_cloud = False
         # Fall through to family rules below
 
