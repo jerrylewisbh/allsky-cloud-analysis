@@ -381,12 +381,12 @@ def classify(weak: dict[tuple, dict],
         confident_cloud = (local_scl == 0 and local_sc >= 2)
 
     # 7. Local clear signals dominate — but defer to METAR if it sees regional
-    #    BKN/OVC. A clear pocket overhead is plausible, but so is "thin cloud
-    #    outside the narrow-FOV thermal sensor that the labeler can see in the
-    #    full fisheye." When METAR contradicts, fall through to family rules
-    #    as low-confidence cloud instead of forcing clear.
+    #    BKN/OVC, or if GOES explicitly confirms a cloud overhead. A clear pocket 
+    #    overhead is plausible, but so is thin/scattered cloud outside the narrow-FOV 
+    #    sensors that the labeler can see. When METAR or GOES contradicts, fall 
+    #    through to family rules as low-confidence cloud instead of forcing clear.
     elif local_scl >= 2 and local_scl > local_cloud_evidence:
-        if metar_okta is not None and metar_okta >= 6:
+        if (metar_okta is not None and metar_okta >= 6) or goes_mask == 1:
             confident_cloud = False  # fall through to family resolution below
         else:
             sig = ", ".join(v[2] for v in strong_clear if v[3])
