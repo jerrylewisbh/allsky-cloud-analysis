@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Weekly GOES-19 fetch (ACMC + ACTPC + ACHAC, no COD per Calgary-latitude limit).
+# Daily GOES-19 fetch (ACMC + ACTPC + ACHAC, no COD per Calgary-latitude limit).
 # Downloads ~250 MB/day to goes_cache/ — set up rotation if disk-constrained.
 
 source "$(dirname "$0")/_common.sh"

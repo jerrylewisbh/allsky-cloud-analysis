@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Weekly METAR pull for both stations. Re-runs are idempotent (dedup by key).
+# Daily METAR pull for both stations. Re-runs are idempotent (dedup by key).
 
 source "$(dirname "$0")/_common.sh"
 

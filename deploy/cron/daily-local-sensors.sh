@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Weekly pull of AWNET weather + ESP sensors + ephemeris from PG.
+# Daily pull of AWNET weather + ESP sensors + ephemeris from PG.
 
 source "$(dirname "$0")/_common.sh"
 

@@ -14,15 +14,15 @@ LOG_DIR=/var/log/allsky-cloud-analysis
 # Daily 04:00 local — generate masks for yesterday's captures
 0 4 * * * $PROJECT_DIR_ROOT/deploy/cron/daily-mask-gen.sh >> $LOG_DIR/daily-mask-gen.log 2>&1
 
-# Weekly Monday 02:00 — METAR (both stations)
-0 2 * * 1 $PROJECT_DIR_ROOT/deploy/cron/weekly-metar.sh >> $LOG_DIR/weekly-metar.log 2>&1
+# Daily 02:00 — METAR (both stations)
+0 2 * * * $PROJECT_DIR_ROOT/deploy/cron/daily-metar.sh >> $LOG_DIR/daily-metar.log 2>&1
 
-# Weekly Monday 02:30 — local AWNET + ESP sensors from PG
-30 2 * * 1 $PROJECT_DIR_ROOT/deploy/cron/weekly-local-sensors.sh >> $LOG_DIR/weekly-local-sensors.log 2>&1
+# Daily 02:30 — local AWNET + ESP sensors from PG
+30 2 * * * $PROJECT_DIR_ROOT/deploy/cron/daily-local-sensors.sh >> $LOG_DIR/daily-local-sensors.log 2>&1
 
-# Weekly Monday 05:00 — GOES-19 ABI products (~1–2 hr).
+# Daily 05:00 — GOES-19 ABI products (~1–2 hr).
 # Bumped from 03:00 to clear the daily backup_to_nas.sh window.
-0 5 * * 1 $PROJECT_DIR_ROOT/deploy/cron/weekly-goes.sh >> $LOG_DIR/weekly-goes.log 2>&1
+0 5 * * * $PROJECT_DIR_ROOT/deploy/cron/daily-goes.sh >> $LOG_DIR/daily-goes.log 2>&1
 
-# Weekly Monday 08:00 — regenerate auto_labels.csv (after GOES finishes)
-0 8 * * 1 $PROJECT_DIR_ROOT/deploy/cron/weekly-auto-classify.sh >> $LOG_DIR/weekly-auto-classify.log 2>&1
+# Daily 08:00 — regenerate auto_labels.csv (after GOES finishes)
+0 8 * * * $PROJECT_DIR_ROOT/deploy/cron/daily-auto-classify.sh >> $LOG_DIR/daily-auto-classify.log 2>&1

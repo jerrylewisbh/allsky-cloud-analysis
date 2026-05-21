@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Weekly: regenerate labels/auto_labels.csv against the latest weak labels +
-# masks. Run AFTER weekly-metar, weekly-goes, weekly-local-sensors so it sees
+# Daily: regenerate labels/auto_labels.csv against the latest weak labels +
+# masks. Run AFTER daily-metar, daily-goes, daily-local-sensors so it sees
 # fresh data.
 
 source "$(dirname "$0")/_common.sh"
