@@ -184,8 +184,8 @@ def classify(weak: dict[tuple, dict],
     if (goes_phase == "ice"
             and goes_height is not None and goes_height > 6000
             and goes_mask == 1
-            and metar_okta is not None and metar_okta <= 2
-            and thermal_mean_p is not None and thermal_mean_p < 0.08
+            and metar_okta is not None and metar_okta <= 3
+            and thermal_mean_p is not None and thermal_mean_p < 0.10
             and (csi is None or csi >= 0.85)):
         return "ci", "medium", \
                (f"GOES high-ice cloud (top {goes_height:.0f}m, mask=1) + "
