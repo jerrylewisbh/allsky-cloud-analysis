@@ -287,15 +287,12 @@ def classify(weak: dict[tuple, dict],
 
     if is_day and rgb_nrbr_mean is not None:
         # Normalized Red-Blue Ratio (R-B)/(R+B):
-        #   ≲ -0.30  = blue sky (R much less than B)
-        #   ≈ 0      = white (R ≈ B, classic cloud signature)
-        #   > 0      = red-shifted (sunset/smoke/very thin haze near sun)
-        # Captures visible cloud the thermal sensor + firmware miss
-        # (Cu, thin Sc, daytime thin cirrus). Daytime only — RGB at night
-        # carries no cloud signal without sun.
-        if rgb_nrbr_mean > -0.10:
+        #   ≲ -0.50  = deep blue sky (Strong Clear)
+        #   > -0.25  = visible cloud/haze (Strong Cloud)
+        #   -0.5..-0.25 = Weak Cloud / Haze boundary
+        if rgb_nrbr_mean > -0.25:
             v = True
-        elif rgb_nrbr_mean < -0.30:
+        elif rgb_nrbr_mean < -0.50:
             v = False
         else:
             v = None
