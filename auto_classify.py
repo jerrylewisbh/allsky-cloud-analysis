@@ -60,8 +60,9 @@ def _get(weak: dict, source: str, attr: str,
 
 def classify(weak: dict[tuple, dict],
              thermal_mean_p: Optional[float] = None,
-             rgb_nrbr_mean: Optional[float] = None,
+             rgb_nrbr_p95: Optional[float] = None,
              rgb_v_mean: Optional[float] = None,
+             rgb_v_std: Optional[float] = None,
              thermal_std: Optional[float] = None) -> tuple[str, str, str]:
     """Returns (class, confidence, reasoning).
 
@@ -71,16 +72,16 @@ def classify(weak: dict[tuple, dict],
         Loaded from labels/weak_labels.csv, same shape as labeling_tool uses.
     thermal_mean_p : float, optional
         Mean cloud probability over the valid pixels of the local thermal mask.
-    rgb_nrbr_mean : float, optional
-        Mean Normalized Red-Blue Ratio (R-B)/(R+B) over the thermal-valid
-        region of the RGB crop. Daytime cloud signal that bypasses the
-        thermal-weak failure mode (Heinle 2010 §3). Daytime only.
+    rgb_nrbr_p95 : float, optional
+        95th percentile of Normalized Red-Blue Ratio (R-B)/(R+B) over the 
+        thermal-valid region of the RGB crop. Captures the 'whitest' (cloudiest)
+        peak signal, preventing small puffs from being washed out by blue sky.
     rgb_v_mean : float, optional
         Mean V (HSV brightness, 0–255) over the thermal-valid region of the
-        long-exposure RGB crop. Nighttime cloud signal — thin cirrus reflects
-        Calgary city skyglow and appears brighter than dark clear sky. Noisy
-        because of exposure variation + moon, but catches some thin nighttime
-        cloud the multimodal physics sensors all miss. Nighttime only.
+        long-exposure RGB crop. 
+    rgb_v_std : float, optional
+        Standard deviation of V channel. High variance at night indicates 
+        texture (clouds reflecting skyglow) vs uniform clear sky.
     thermal_std : float, optional
         Spatial standard deviation of cloud probability across valid mask
         pixels. Discriminates clouds with internal structure (Cu fragments
@@ -285,40 +286,29 @@ def classify(weak: dict[tuple, dict],
             v = None  # unknown firmware verdict — be cautious
         votes.append(("sky_cond", v, f"sky_condition={sky_cond}", True))
 
-    if is_day and rgb_nrbr_mean is not None:
+    if is_day and rgb_nrbr_p95 is not None:
         # Normalized Red-Blue Ratio (R-B)/(R+B):
-        #   ≲ -0.30  = blue sky (R much less than B)
-        #   ≈ 0      = white (R ≈ B, classic cloud signature)
-        #   > 0      = red-shifted (sunset/smoke/very thin haze near sun)
-        # Captures visible cloud the thermal sensor + firmware miss
-        # (Cu, thin Sc, daytime thin cirrus). Daytime only — RGB at night
-        # carries no cloud signal without sun.
-        if rgb_nrbr_mean > -0.10:
+        #   ≲ -0.45  = deep blue sky peak (Strong Clear)
+        #   > -0.20  = white cloud peak (Strong Cloud)
+        if rgb_nrbr_p95 > -0.20:
             v = True
-        elif rgb_nrbr_mean < -0.30:
+        elif rgb_nrbr_p95 < -0.45:
             v = False
         else:
             v = None
-        votes.append(("rgb_nrbr", v, f"nrbr={rgb_nrbr_mean:+.2f}", True))
+        votes.append(("rgb_nrbr_peak", v, f"nrbr_p95={rgb_nrbr_p95:+.2f}", True))
 
-    if is_night and rgb_v_mean is not None:
-        # Mean HSV V over the thermal-valid region of the long-exposure RGB.
-        # Calibrated against the hand-labeled subset: cs_cc (high cirrus)
-        # has median V≈126 (p25≈107), while clear frames extend up to ~80
-        # because of Calgary's urban skyglow. Threshold at V=80 puts the
-        # cutoff just above the clear distribution.
-        #   V > 80 : strong cloud
-        #   V > 50 : weak cloud (overlaps clear / sc / multi — half-weight)
-        #   V < 20 : strong clear (genuinely dark)
-        if rgb_v_mean > 80:
+    if is_night and rgb_v_mean is not None and rgb_v_std is not None:
+        # Mean HSV V + STD:
+        #   Texture (std > 10) OR high brightness (mean > 80) = Strong Cloud
+        #   Uniform dark sky (std < 5 AND mean < 30) = Strong Clear
+        if rgb_v_std > 10.0 or rgb_v_mean > 80:
             v = True
-        elif rgb_v_mean > 50:
-            v = None  # weak — pushes toward cloud but doesn't override
-        elif rgb_v_mean < 20:
+        elif rgb_v_mean < 30 and rgb_v_std < 5.0:
             v = False
         else:
-            v = None  # 20–50 is also weak (noise floor + dim skyglow)
-        votes.append(("rgb_v_night", v, f"v_night={rgb_v_mean:.0f}", True))
+            v = None
+        votes.append(("rgb_v_night", v, f"v_mean={rgb_v_mean:.0f} v_std={rgb_v_std:.1f}", True))
 
     if not votes:
         return "clear", "low", "no signals available"

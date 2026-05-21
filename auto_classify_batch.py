@@ -77,24 +77,25 @@ def _rgb_and_valid(rgb_path: Path, mask_path: Path):
     return rgb, valid
 
 
-def rgb_nrbr_in_valid_region(rgb_path: Path, mask_path: Path) -> float | None:
-    """Mean (R-B)/(R+B) over the thermal-valid pixels of the RGB crop."""
+def rgb_nrbr_p95_in_valid_region(rgb_path: Path, mask_path: Path) -> float | None:
+    """95th percentile of (R-B)/(R+B) over the thermal-valid pixels of the RGB crop."""
     rgb, valid = _rgb_and_valid(rgb_path, mask_path)
     if rgb is None or valid is None:
         return None
     r = rgb[..., 0][valid]
     b = rgb[..., 2][valid]
-    return float(((r - b) / (r + b + 1e-6)).mean())
+    nrbr = (r - b) / (r + b + 1e-6)
+    return float(np.percentile(nrbr, 95))
 
 
-def rgb_v_mean_in_valid_region(rgb_path: Path, mask_path: Path) -> float | None:
-    """Mean HSV V (brightness, 0–255) over the thermal-valid pixels.
-    Used as a nighttime cloud-presence vote (skyglow reflection)."""
+def rgb_v_stats_in_valid_region(rgb_path: Path, mask_path: Path) -> tuple[float | None, float | None]:
+    """Mean and STD of HSV V (brightness, 0–255) over the thermal-valid pixels.
+    Used as a nighttime cloud-presence vote (skyglow reflection + texture)."""
     rgb, valid = _rgb_and_valid(rgb_path, mask_path)
     if rgb is None or valid is None:
-        return None
-    v_channel = rgb.max(axis=-1)  # V in HSV = max of (R, G, B)
-    return float(v_channel[valid].mean())
+        return None, None
+    v_channel = rgb.max(axis=-1)[valid]
+    return float(v_channel.mean()), float(v_channel.std())
 
 
 def discover_frames(datasets_glob: str) -> list[tuple[str, str, str]]:
@@ -140,12 +141,13 @@ def main():
     conf_dist = Counter()
     for i, (fid, mask_path, rgb_path) in enumerate(frames):
         mp, mstd = thermal_stats(Path(mask_path))
-        nrbr = rgb_nrbr_in_valid_region(Path(rgb_path), Path(mask_path))
-        v_mean = rgb_v_mean_in_valid_region(Path(rgb_path), Path(mask_path))
+        nrbr_p95 = rgb_nrbr_p95_in_valid_region(Path(rgb_path), Path(mask_path))
+        v_mean, v_std = rgb_v_stats_in_valid_region(Path(rgb_path), Path(mask_path))
         wf = weak.get(fid, {})
         cls, conf, reasoning = classify(wf, thermal_mean_p=mp,
-                                         rgb_nrbr_mean=nrbr,
+                                         rgb_nrbr_p95=nrbr_p95,
                                          rgb_v_mean=v_mean,
+                                         rgb_v_std=v_std,
                                          thermal_std=mstd)
         rows.append({
             "frame_id": fid,
@@ -154,8 +156,9 @@ def main():
             "auto_reasoning": reasoning,
             "thermal_mean_p": f"{mp:.3f}" if mp is not None else "",
             "thermal_std": f"{mstd:.3f}" if mstd is not None else "",
-            "rgb_nrbr": f"{nrbr:+.3f}" if nrbr is not None else "",
+            "rgb_nrbr_p95": f"{nrbr_p95:+.3f}" if nrbr_p95 is not None else "",
             "rgb_v_mean": f"{v_mean:.1f}" if v_mean is not None else "",
+            "rgb_v_std": f"{v_std:.1f}" if v_std is not None else "",
             "computed_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         })
         dist[cls] += 1

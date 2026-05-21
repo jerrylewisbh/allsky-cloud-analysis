@@ -613,22 +613,24 @@ def _rgb_and_valid(rgb_path: str, mask_path: str):
     return rgb, valid
 
 
-def rgb_nrbr_mean(rgb_path: str, mask_path: str) -> float | None:
-    """Mean (R-B)/(R+B) over thermal-valid pixels — daytime cloud cue."""
+def rgb_nrbr_p95(rgb_path: str, mask_path: str) -> float | None:
+    """95th percentile of (R-B)/(R+B) over thermal-valid pixels — daytime cloud peak cue."""
     rgb, valid = _rgb_and_valid(rgb_path, mask_path)
     if rgb is None or valid is None:
         return None
     r = rgb[..., 0][valid]
     b = rgb[..., 2][valid]
-    return float(((r - b) / (r + b + 1e-6)).mean())
+    nrbr = (r - b) / (r + b + 1e-6)
+    return float(np.percentile(nrbr, 95))
 
 
-def rgb_v_mean(rgb_path: str, mask_path: str) -> float | None:
-    """Mean HSV V over thermal-valid pixels — nighttime cloud cue."""
+def rgb_v_stats(rgb_path: str, mask_path: str) -> tuple[float | None, float | None]:
+    """Mean and STD of HSV V over thermal-valid pixels — nighttime cloud cue."""
     rgb, valid = _rgb_and_valid(rgb_path, mask_path)
     if rgb is None or valid is None:
-        return None
-    return float(rgb.max(axis=-1)[valid].mean())
+        return None, None
+    v_channel = rgb.max(axis=-1)[valid]
+    return float(v_channel.mean()), float(v_channel.std())
 
 
 @st.cache_data(show_spinner=False)
@@ -991,14 +993,15 @@ def main() -> None:
     ts_str = ts.strftime("%Y-%m-%d %H:%M:%S UTC") if ts else "(no timestamp)"
     mean_p, frac_50, nodata_frac, std_p = thermal_cloud_stats(pair["mask_path"])
 
-    # Compute auto-label using all weak labels + local thermal + RGB NRBR (day) + RGB V (night)
+    # Compute auto-label using all weak labels + local thermal + RGB peak (day) + RGB V (night)
     # (weak_mtime hoisted above the sidebar so the review filter can use it too)
     weak_for_frame = load_weak_labels(str(WEAK_LABELS_CSV), weak_mtime).get(pair["frame_id"], {})
-    nrbr = rgb_nrbr_mean(pair["rgb_path"], pair["mask_path"])
-    v_mean = rgb_v_mean(pair["rgb_path"], pair["mask_path"])
+    nrbr_p95 = rgb_nrbr_p95(pair["rgb_path"], pair["mask_path"])
+    v_mean, v_std = rgb_v_stats(pair["rgb_path"], pair["mask_path"])
     auto_label, auto_conf, auto_reason = auto_classify(
         weak_for_frame, thermal_mean_p=mean_p,
-        rgb_nrbr_mean=nrbr, rgb_v_mean=v_mean,
+        rgb_nrbr_p95=nrbr_p95, rgb_v_mean=v_mean,
+        rgb_v_std=v_std,
         thermal_std=std_p,
     )
 
