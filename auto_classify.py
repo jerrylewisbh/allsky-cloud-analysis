@@ -287,12 +287,12 @@ def classify(weak: dict[tuple, dict],
 
     if is_day and rgb_nrbr_mean is not None:
         # Normalized Red-Blue Ratio (R-B)/(R+B):
-        #   ≲ -0.50  = deep blue sky (Strong Clear)
-        #   > -0.25  = visible cloud/haze (Strong Cloud)
-        #   -0.5..-0.25 = Weak Cloud / Haze boundary
-        if rgb_nrbr_mean > -0.25:
+        #   ≲ -0.55  = deep blue sky (Strong Clear)
+        #   > -0.35  = visible cloud/haze (Strong Cloud)
+        #   -0.55..-0.35 = Weak Cloud / Haze boundary
+        if rgb_nrbr_mean > -0.35:
             v = True
-        elif rgb_nrbr_mean < -0.50:
+        elif rgb_nrbr_mean < -0.55:
             v = False
         else:
             v = None
