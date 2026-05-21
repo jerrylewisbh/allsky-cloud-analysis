@@ -833,6 +833,20 @@ def main() -> None:
 
         st.divider()
         st.subheader("Jump")
+        
+        if st.button("🎲 Random Unlabeled", use_container_width=True):
+            unlabeled_indices = [
+                i for i, p in enumerate(pairs) 
+                if p["frame_id"] not in labeled_ids
+            ]
+            if unlabeled_indices:
+                import random
+                st.session_state.idx = random.choice(unlabeled_indices)
+                st.session_state.frame_started_at = time.time()
+                st.rerun()
+            else:
+                st.sidebar.success("All frames have been labeled!")
+
         idx_input = st.number_input(
             "Frame index", min_value=0, max_value=len(pairs) - 1,
             value=int(st.session_state.idx), step=1,
