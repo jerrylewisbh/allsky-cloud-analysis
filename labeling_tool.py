@@ -701,21 +701,24 @@ def compute_matching_ids(
 
 
 @st.cache_data(show_spinner="Mining pre-rain candidates...")
-def compute_pre_rain_candidates(
+def compute_rain_sessions(
     frame_ids: tuple[str, ...],
     weak_csv: str, weak_mtime: float,
     window_minutes: int = 60,
-) -> frozenset[str]:
-    """Find frames within `window_minutes` BEFORE a rain-onset event AND
-    showing cloud signature (GOES cloud_present=1 + phase ice/mixed +
-    height > 5 km).
+) -> tuple[tuple[str, frozenset[str]], ...]:
+    """Returns ((session_label, candidate_frame_ids), ...) — one entry per
+    rain-onset event detected in the data.
+
+    Each session_label is the onset timestamp formatted as "YYYY-MM-DD HH:MM UTC".
+    candidate_frame_ids is the set of frames in (onset - window, onset) that
+    show GOES cloud signature (cloud_present=1 + phase ice/mixed + top > 5 km).
 
     These are the high-value "ns_cb cloud overhead, lens still clean" frames
     for breaking the rain_on_lens confound — same physical regime as wet-lens
     ns_cb frames but without the lens artifact, so models trained on them
     learn cloud structure rather than raindrops on glass.
 
-    Returns empty set if no rain events in the data.
+    Returns empty tuple if no rain events in the data.
     """
     import bisect
     weak = load_weak_labels(weak_csv, weak_mtime)
@@ -738,8 +741,10 @@ def compute_pre_rain_candidates(
     records.sort(key=lambda r: r[0])
 
     # Find rain-onset timestamps: prev ≤ 0.01 mm and current > 0.01 mm.
-    # rain_1h_mm is cumulative over the past hour, so the leading edge is
-    # the first frame where it transitions to non-zero.
+    # rain_1h_mm is cumulative over the past hour — the leading edge is
+    # the first frame where it transitions to non-zero. Subsequent onsets
+    # within the same physical storm get separate sessions only if rain
+    # truly drops to zero between them (rare for sustained storms).
     THRESHOLD = 0.01
     onset_times = [
         records[i][0]
@@ -747,29 +752,25 @@ def compute_pre_rain_candidates(
         if records[i - 1][2] <= THRESHOLD and records[i][2] > THRESHOLD
     ]
     if not onset_times:
-        return frozenset()
+        return tuple()
 
-    # For each onset, collect frame_ids in (onset - window, onset)
-    # with GOES cloud signature confirming the cloud is already overhead.
     record_times = [r[0] for r in records]
     window = dt.timedelta(minutes=window_minutes)
-    candidates: set[str] = set()
+    sessions: list[tuple[str, frozenset[str]]] = []
     for onset in onset_times:
         lo = bisect.bisect_left(record_times, onset - window)
         hi = bisect.bisect_left(record_times, onset)
+        session_frames: set[str] = set()
         for idx in range(lo, hi):
             fid = records[idx][1]
             wf = weak.get(fid, {})
 
-            # GOES says cloud_present=1
             goes_present = wf.get(("goes19_acmc", "cloud_present"))
             if goes_present is None or str(goes_present.get("value")) != "1":
                 continue
-            # Phase ice or mixed (water-only is more often Cu/Sc, not ns_cb)
             goes_phase = wf.get(("goes19_actpc", "cloud_top_phase"))
             if goes_phase is None or goes_phase.get("value") not in ("ice", "mixed"):
                 continue
-            # Cloud top above 5 km (ns_cb has deep structure)
             goes_height = wf.get(("goes19_achac", "cloud_top_height_m"))
             if goes_height is None:
                 continue
@@ -778,8 +779,12 @@ def compute_pre_rain_candidates(
                     continue
             except (ValueError, TypeError):
                 continue
-            candidates.add(fid)
-    return frozenset(candidates)
+            session_frames.add(fid)
+
+        if session_frames:
+            label = onset.strftime("%Y-%m-%d %H:%M UTC")
+            sessions.append((label, frozenset(session_frames)))
+    return tuple(sessions)
 
 
 def advance(pairs: list[dict], labeled_ids: set[str], direction: int,
@@ -931,6 +936,35 @@ def main() -> None:
             help="How far back from each rain-onset to search. Shorter = tighter "
                  "to onset (more chance lens is still dry). Longer = more "
                  "candidates but possibly less ns_cb-like cloud structure.",
+        )
+
+        # Session-level navigation: list each rain event so labeler can focus
+        # on one storm at a time rather than seeing all sessions interleaved.
+        rain_sessions: tuple[tuple[str, frozenset[str]], ...] = tuple()
+        if pre_rain_only:
+            rain_sessions = compute_rain_sessions(
+                tuple(p["frame_id"] for p in pairs),
+                str(WEAK_LABELS_CSV), weak_mtime,
+                window_minutes=int(pre_rain_window_min),
+            )
+        session_options = ["all sessions"] + [
+            f"{label}  ({len(frames)} frames)"
+            for label, frames in rain_sessions
+        ]
+        if pre_rain_only and rain_sessions:
+            st.caption(f"📊 Found {len(rain_sessions)} rain session(s), "
+                       f"{sum(len(f) for _,f in rain_sessions)} pre-rain candidate frames total.")
+        elif pre_rain_only:
+            st.caption("📊 No rain sessions detected in the dataset.")
+        rain_session_pick = st.selectbox(
+            "Rain session",
+            session_options,
+            index=0,
+            disabled=not pre_rain_only or not rain_sessions,
+            help="Pick a specific storm to focus on, or 'all sessions' to see "
+                 "candidates from every rain event merged together. Each "
+                 "label is the rain-onset timestamp; the lens-clean window "
+                 "ends at that timestamp.",
         )
 
         colormap_name = st.selectbox(
@@ -1089,13 +1123,21 @@ def main() -> None:
             day_night_mode=day_night_filter,
         )
 
-        if pre_rain_only:
-            pre_rain_ids = compute_pre_rain_candidates(
-                tuple(p["frame_id"] for p in pairs),
-                str(WEAK_LABELS_CSV), weak_mtime,
-                window_minutes=int(pre_rain_window_min),
-            )
+        if pre_rain_only and rain_sessions:
+            # rain_sessions was already computed for the sidebar selector
+            if rain_session_pick == "all sessions":
+                pre_rain_ids = frozenset().union(*(f for _, f in rain_sessions))
+            else:
+                # Match by the label prefix (strip the "  (N frames)" suffix)
+                picked_label = rain_session_pick.split("  (")[0]
+                pre_rain_ids = next(
+                    (frames for label, frames in rain_sessions if label == picked_label),
+                    frozenset(),
+                )
             matching_ids = matching_ids & pre_rain_ids
+        elif pre_rain_only:
+            # Checkbox on but no rain sessions found → empty queue
+            matching_ids = frozenset()
 
         def review_filter(p, _ids=matching_ids):
             return p["frame_id"] in _ids
@@ -1117,7 +1159,11 @@ def main() -> None:
         if id_substring:
             filter_desc.append(f"id~{id_substring!r}")
         if pre_rain_only:
-            filter_desc.append(f"pre_rain≤{int(pre_rain_window_min)}min")
+            session_tag = (
+                "all" if rain_session_pick == "all sessions"
+                else rain_session_pick.split("  (")[0]
+            )
+            filter_desc.append(f"pre_rain≤{int(pre_rain_window_min)}min/{session_tag}")
         st.sidebar.caption(
             f"**Filter ({' · '.join(filter_desc)}): {n_match} of {len(pairs)} frames match** "
             f"({100 * n_match / max(len(pairs), 1):.1f}%)."
