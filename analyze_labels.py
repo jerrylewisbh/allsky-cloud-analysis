@@ -302,22 +302,48 @@ def _class_weather_hint(c: str) -> str:
 def section_disagreements(out, merged: pd.DataFrame, k: int = 5) -> None:
     _section(out, "7. TOP DISAGREEMENT PATTERNS")
     bad = merged[merged["class_hand"] != merged["auto_class"]]
-    print(f"  {len(bad)} disagreements out of {len(merged)} "
-          f"({100 * len(bad) / max(len(merged), 1):.1f}%)", file=out)
+    punts = bad[bad["auto_class"] == "unknown"]
+    true_bad = bad[bad["auto_class"] != "unknown"]
+    total = len(merged)
+
+    pct = lambda n: 100 * n / max(total, 1)
+    print(f"  Total disagreements:           {len(bad):>4d} / {total} ({pct(len(bad)):>5.1f}%)", file=out)
+    print(f"    True misclassifications:     {len(true_bad):>4d} / {total} "
+          f"({pct(len(true_bad)):>5.1f}%) — classifier confidently wrong, fix rules",
+          file=out)
+    print(f"    Classifier punts (unknown):  {len(punts):>4d} / {total} "
+          f"({pct(len(punts)):>5.1f}%) — labeler resolved, no rule fix needed",
+          file=out)
     if not len(bad):
         return
-    grouped = (bad.groupby(["class_hand", "auto_class"])
-                  .size().reset_index(name="n")
-                  .sort_values("n", ascending=False))
-    print(file=out)
-    print(f"  {'hand→auto':24s}  {'n':>4s}  example frame_ids", file=out)
-    print(f"  {'─' * 24}  {'─' * 4}", file=out)
-    for _, row in grouped.head(15).iterrows():
-        pair = f"{row['class_hand']:8s} → {row['auto_class']:8s}"
-        examples = (bad[(bad["class_hand"] == row["class_hand"])
-                       & (bad["auto_class"] == row["auto_class"])]
-                    ["frame_id"].head(k).tolist())
-        print(f"  {pair:24s}  {row['n']:>4d}  {', '.join(examples)}", file=out)
+
+    if len(true_bad):
+        print(file=out)
+        print("  ── TRUE MISCLASSIFICATIONS (rule-tuning targets) ──", file=out)
+        grouped = (true_bad.groupby(["class_hand", "auto_class"])
+                          .size().reset_index(name="n")
+                          .sort_values("n", ascending=False))
+        print(f"  {'hand→auto':24s}  {'n':>4s}  example frame_ids", file=out)
+        print(f"  {'─' * 24}  {'─' * 4}", file=out)
+        for _, row in grouped.head(15).iterrows():
+            pair = f"{row['class_hand']:8s} → {row['auto_class']:8s}"
+            examples = (true_bad[(true_bad["class_hand"] == row["class_hand"])
+                                & (true_bad["auto_class"] == row["auto_class"])]
+                        ["frame_id"].head(k).tolist())
+            print(f"  {pair:24s}  {row['n']:>4d}  {', '.join(examples)}", file=out)
+
+    if len(punts):
+        print(file=out)
+        print("  ── PUNTS by hand class (signal-disagreement frames) ──", file=out)
+        punt_by_class = (punts.groupby("class_hand").size()
+                              .reset_index(name="n").sort_values("n", ascending=False))
+        print(f"  {'hand class':24s}  {'n':>4s}  example frame_ids", file=out)
+        print(f"  {'─' * 24}  {'─' * 4}", file=out)
+        for _, row in punt_by_class.iterrows():
+            examples = (punts[punts["class_hand"] == row["class_hand"]]
+                        ["frame_id"].head(k).tolist())
+            label = f"{row['class_hand']:8s} → unknown"
+            print(f"  {label:24s}  {row['n']:>4d}  {', '.join(examples)}", file=out)
 
 
 def section_recommendations(out, merged: pd.DataFrame, hand: pd.DataFrame,
