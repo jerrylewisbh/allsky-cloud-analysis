@@ -320,6 +320,15 @@ def classify(weak: dict[tuple, dict],
         confident_cloud = False  # only one cloud signal, low conf
         # Fall through to family resolution
 
+    # 3d. Weak consensus: many weak cloud-leaning signals + zero strong clear.
+    #     Thin uniform cloud (As, Cs, thin Ac) often shows as multiple weak
+    #     votes rather than a single strong one — borderline thermal, GOES
+    #     with phase-but-no-mask, METAR scattered, dim RGB at night. The
+    #     cascade should treat this aggregate as evidence rather than punt.
+    elif n_w >= 3 and n_scl == 0:
+        confident_cloud = False  # thin cloud — low conf is honest
+        # Fall through to family resolution
+
     # 4. Truly mixed (no strong cloud signal at all, OR cloud signal contradicted by clears)
     else:
         cl_src = [v[0] for v in strong_cloud] + [f"~{v[0]}" for v in weak_cloud]
