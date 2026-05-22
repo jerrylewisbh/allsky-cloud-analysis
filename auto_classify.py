@@ -96,6 +96,8 @@ def classify(weak: dict[tuple, dict],
     """
     # ---- pull signals ----
     sun_alt = _get(weak, "ephemeris", "sun_alt_deg", as_float=True)
+    moon_alt = _get(weak, "ephemeris", "moon_alt_deg", as_float=True)
+    moon_phase = _get(weak, "ephemeris", "moon_phase_pct", as_float=True)
     csi = _get(weak, "derived", "daytime_clear_sky_index", as_float=True)
     # ESP32 lux/mpsas/sky_condition intentionally not used — sensor is unreliable.
     # Night cloud presence now relies on thermal_mean_p, GOES, METAR, and rgb_v_night.
@@ -226,9 +228,19 @@ def classify(weak: dict[tuple, dict],
     if is_night and rgb_v_mean is not None and rgb_v_std is not None:
         # Brightness OR texture alone is unreliable — moonlight inflates v_mean,
         # and warm sensor noise inflates v_std. Require both for a cloud vote.
+        #
+        # The strong-CLEAR branch additionally requires a light source: at deep
+        # night with no moon, the patch is dark whether it's clear OR thinly
+        # cloudy (cirrus with stars showing through), so "dark = clear" is an
+        # invalid inference. Without illumination, demote to weak.
+        light_available = (
+            (sun_alt is not None and sun_alt > -12.0)  # nautical twilight or shallower
+            or (moon_alt is not None and moon_alt > 0 and
+                moon_phase is not None and moon_phase > 10)
+        )
         if rgb_v_std > 15.0 and rgb_v_mean > 80:
             v = True
-        elif rgb_v_mean < 50 and rgb_v_std < 5.0:
+        elif rgb_v_mean < 50 and rgb_v_std < 5.0 and light_available:
             v = False
         else:
             v = None
