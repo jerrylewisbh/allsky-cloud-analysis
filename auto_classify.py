@@ -104,8 +104,13 @@ def classify(weak: dict[tuple, dict],
     metar_genus = _get(weak, "metar", "cloud_genus_hint")
     metar_bucket = _get(weak, "metar", "altitude_bucket")
 
-    is_day = sun_alt is not None and sun_alt > 6.0
-    is_night = sun_alt is not None and sun_alt < -6.0
+    # Day/night split at the horizon — twilight frames need to contribute too.
+    # CSI is None below sun_alt ≈ 0 (clear-sky model unstable), so its vote
+    # simply won't fire there; rgb_nrbr is meaningful any time the sun is up.
+    # rgb_v_night is the long-exposure RGB and is meaningful any time the sun
+    # is down, including civil/nautical twilight.
+    is_day = sun_alt is not None and sun_alt > 0.0
+    is_night = sun_alt is not None and sun_alt < 0.0
     csi_std = _get(weak, "derived", "csi_std_10min", as_float=True)
 
     # ---- Rule 0: thermal spatial-variance texture (overrides clear cascade) ----
@@ -181,9 +186,13 @@ def classify(weak: dict[tuple, dict],
         votes.append(("goes", v, f"goes_mask={goes_mask} phase={goes_phase}", False))
 
     if is_day and csi is not None:
-        if csi > 1.1 or csi < 0.7:
+        # Widened cloud bands: CSI < 0.80 means >20% of expected irradiance is
+        # missing — almost always partial cloud shading. The old < 0.70 floor
+        # let moderate Cu/Sc shading slip into the "weak" bucket.
+        # CSI > 1.15 captures cloud-edge reflection brightening near the sun.
+        if csi < 0.80 or csi > 1.15:
             v = True
-        elif csi > 1.05 or csi < 0.85:
+        elif csi < 0.92 or csi > 1.08:
             v = None
         else:
             v = False
@@ -240,10 +249,12 @@ def classify(weak: dict[tuple, dict],
     #    the cascade so the texture signal can route to cu/sc/ac_as.
     has_texture = thermal_std is not None and thermal_std > 0.05
     if n_scl >= 3 and n_w <= 1 and n_sc == 0 and not has_texture:
-        twilight = sun_alt is not None and -18.0 <= sun_alt < -6.0
+        # Cap confidence at medium any time the sun is near or below the horizon —
+        # signal quality degrades smoothly from civil twilight through deep night.
+        near_horizon = sun_alt is not None and sun_alt < 6.0
         sig = ", ".join(v[2] for v in strong_clear)
         weak_note = "" if n_w == 0 else f" (one boundary signal: {weak_cloud[0][2]})"
-        conf = "medium" if twilight else "high"
+        conf = "medium" if near_horizon else "high"
         return "clear", conf, f"{n_scl} signals strongly clear ({sig}){weak_note}"
 
     # 2. Local clear majority - TRUST THE THERMAL PATCH
