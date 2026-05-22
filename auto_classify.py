@@ -363,9 +363,14 @@ def classify(weak: dict[tuple, dict],
 
     # ---- Rule 6: genus within family ----
     if family == "high":
+        # Default to cs_cc (Cs/Cc) rather than ci: at mid-latitudes (e.g. Calgary)
+        # cirrostratus sheets and cirrocumulus ripples are more common than
+        # isolated mare's-tails cirrus. Rules can't distinguish these without
+        # RGB texture; flipping the default minimizes systematic mislabeling
+        # of Cc/Cs as Ci. Labeler overrides to `ci` when fibrous streaks visible.
         if is_night and (thermal_mean_p is None or thermal_mean_p < 0.3):
-            return "ci", "medium", "; ".join(
-                reasoning_bits + ["nighttime high cloud, thermal_p<0.3 → Ci-like thin"])
+            return "cs_cc", "medium", "; ".join(
+                reasoning_bits + ["nighttime high cloud, thermal_p<0.3 → thin Cc/Cs (override to ci if fibrous)"])
         return "cs_cc", "low", "; ".join(reasoning_bits + ["Ci/Cs/Cc need RGB texture"])
 
     if family == "mid":
