@@ -251,14 +251,14 @@ def classify(weak: dict[tuple, dict],
         night_weak = False
 
         if lux is not None:
-            if lux > 0.05: night_cloud = True
-            elif lux < 0.01: night_clear = True
+            if lux > 0.08: night_cloud = True # Higher threshold for skyglow
+            elif lux < 0.005: night_clear = True
             else: night_weak = True
             votes.append(("lux", night_cloud if not night_weak else None, f"lux={lux:.3f}", True))
-        
+
         elif mpsas is not None:
-            if mpsas < 17.0: night_cloud = True
-            elif mpsas >= 18.0: night_clear = True
+            if mpsas < 16.0: night_cloud = True # Skyglow in clear Calgary is ~17-18
+            elif mpsas >= 18.5: night_clear = True
             else: night_weak = True
             votes.append(("mpsas", night_cloud if not night_weak else None, f"mpsas={mpsas:.2f}", True))
 
@@ -288,11 +288,11 @@ def classify(weak: dict[tuple, dict],
 
     if is_day and rgb_nrbr_p95 is not None:
         # Normalized Red-Blue Ratio (R-B)/(R+B):
-        #   ≲ -0.45  = deep blue sky peak (Strong Clear)
-        #   > -0.20  = white cloud peak (Strong Cloud)
-        if rgb_nrbr_p95 > -0.20:
+        #   ≲ -0.50  = deep blue sky peak (Strong Clear)
+        #   > -0.15  = white cloud peak (Strong Cloud)
+        if rgb_nrbr_p95 > -0.15:
             v = True
-        elif rgb_nrbr_p95 < -0.45:
+        elif rgb_nrbr_p95 < -0.50:
             v = False
         else:
             v = None
@@ -300,11 +300,11 @@ def classify(weak: dict[tuple, dict],
 
     if is_night and rgb_v_mean is not None and rgb_v_std is not None:
         # Mean HSV V + STD:
-        #   Texture (std > 10) OR high brightness (mean > 80) = Strong Cloud
-        #   Uniform dark sky (std < 5 AND mean < 30) = Strong Clear
-        if rgb_v_std > 10.0 or rgb_v_mean > 80:
+        #   Texture (std > 15) OR high brightness (mean > 100) = Strong Cloud
+        #   Uniform dark sky (std < 5 AND mean < 50) = Strong Clear
+        if rgb_v_std > 15.0 or rgb_v_mean > 100:
             v = True
-        elif rgb_v_mean < 30 and rgb_v_std < 5.0:
+        elif rgb_v_mean < 50 and rgb_v_std < 5.0:
             v = False
         else:
             v = None
