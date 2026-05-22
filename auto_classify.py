@@ -339,7 +339,20 @@ def classify(weak: dict[tuple, dict],
         family_reason = f"METAR bucket → {family}"
 
     if family is None:
-        return "unknown", "low", "cloud present but altitude family unknown"
+        # Local-only cloud fallback: thermal patch screams cloud but every
+        # regional signal (GOES, METAR) says clear sky → no cloud-top height
+        # is available to set the family. By elimination this must be LOW
+        # cloud — GOES and airport observers reliably see mid/high cloud at
+        # this scale, so localized cu/sc is the only thing that fits.
+        # Rule 6 then routes cu vs sc via thermal_std / METAR genus.
+        if thermal_mean_p is not None and thermal_mean_p > 0.4:
+            family = "low"
+            family_reason = (
+                f"local-only cloud (thermal_p={thermal_mean_p:.2f}, "
+                "no regional height) → must be low cu/sc"
+            )
+        else:
+            return "unknown", "low", "cloud present but altitude family unknown"
 
     base_conf = "medium" if confident_cloud else "low"
     reasoning_bits = [family_reason]
