@@ -93,9 +93,8 @@ def classify(weak: dict[tuple, dict],
     # ---- pull signals ----
     sun_alt = _get(weak, "ephemeris", "sun_alt_deg", as_float=True)
     csi = _get(weak, "derived", "daytime_clear_sky_index", as_float=True)
-    mpsas = _get(weak, "esp32_sensor", "sky_brightness_mpsas", as_float=True)
-    lux = _get(weak, "esp32_sensor", "illuminance_lux", as_float=True)
-    sky_cond = _get(weak, "esp32_sensor", "sky_condition")  # firmware's own verdict
+    # ESP32 lux/mpsas/sky_condition intentionally not used — sensor is unreliable.
+    # Night cloud presence now relies on thermal_mean_p, GOES, METAR, and rgb_v_night.
     humidity = _get(weak, "weather_station", "humidity_pct", as_float=True)
     rain_mm = _get(weak, "weather_station", "rain_1h_mm", as_float=True)
     goes_mask = _get(weak, "goes19_acmc", "cloud_present", as_int=True)
@@ -110,10 +109,14 @@ def classify(weak: dict[tuple, dict],
     csi_std = _get(weak, "derived", "csi_std_10min", as_float=True)
 
     # ---- Rule 0: thermal spatial-variance texture (overrides clear cascade) ----
+    # True-clear thermal_std tops out near 0.04 in this dataset, so 0.07 is a
+    # safe floor for "structured". The mean lower bound is dropped because
+    # broken Cu against a narrow thermal FOV often has very low overall
+    # mean_p (~0.04) — the texture is in the std, not the mean.
     high_family_from_goes = (goes_height is not None and goes_height >= 6000)
     if (not high_family_from_goes
-            and thermal_std is not None and thermal_std > 0.10
-            and thermal_mean_p is not None and 0.05 < thermal_mean_p < 0.70):
+            and thermal_std is not None and thermal_std > 0.07
+            and thermal_mean_p is not None and thermal_mean_p < 0.70):
         texture_note = f"thermal std={thermal_std:.2f} mean={thermal_mean_p:.2f}"
         if is_day:
             if metar_okta is not None and metar_okta >= 5:
@@ -186,24 +189,6 @@ def classify(weak: dict[tuple, dict],
             v = False
         votes.append(("csi", v, f"csi={csi:.2f}", True))
 
-    is_deep_night = sun_alt is not None and sun_alt < -18.0
-    if is_deep_night:
-        night_cloud = False
-        night_clear = False
-        night_weak = False
-
-        if lux is not None:
-            if lux > 0.08: night_cloud = True
-            elif lux < 0.005: night_clear = True
-            else: night_weak = True
-            votes.append(("lux", night_cloud if not night_weak else None, f"lux={lux:.3f}", True))
-
-        elif mpsas is not None:
-            if mpsas < 16.0: night_cloud = True
-            elif mpsas >= 18.5: night_clear = True
-            else: night_weak = True
-            votes.append(("mpsas", night_cloud if not night_weak else None, f"mpsas={mpsas:.2f}", True))
-
     if metar_okta is not None:
         if metar_okta >= 5:
             v = True
@@ -212,17 +197,6 @@ def classify(weak: dict[tuple, dict],
         else:
             v = False
         votes.append(("metar", v, f"metar_okta={metar_okta}", False))
-
-    if sky_cond:
-        if sky_cond in ("mostly_cloudy", "overcast"):
-            v = True
-        elif sky_cond in ("mostly_clear", "partly_cloudy"):
-            v = None
-        elif sky_cond in ("very_clear", "clear"):
-            v = False
-        else:
-            v = None
-        votes.append(("sky_cond", v, f"sky_condition={sky_cond}", True))
 
     if is_day and rgb_nrbr_p95 is not None:
         if rgb_nrbr_p95 > -0.15:
@@ -234,7 +208,9 @@ def classify(weak: dict[tuple, dict],
         votes.append(("rgb_nrbr_peak", v, f"nrbr_p95={rgb_nrbr_p95:+.2f}", True))
 
     if is_night and rgb_v_mean is not None and rgb_v_std is not None:
-        if rgb_v_std > 15.0 or rgb_v_mean > 100:
+        # Brightness OR texture alone is unreliable — moonlight inflates v_mean,
+        # and warm sensor noise inflates v_std. Require both for a cloud vote.
+        if rgb_v_std > 15.0 and rgb_v_mean > 80:
             v = True
         elif rgb_v_mean < 50 and rgb_v_std < 5.0:
             v = False
@@ -258,7 +234,12 @@ def classify(weak: dict[tuple, dict],
     local_cloud_evidence = local_sc + 0.5 * local_w
 
     # 1. All-strong-clear with at most one boundary signal.
-    if n_scl >= 3 and n_w <= 1 and n_sc == 0:
+    #    Texture guard: the scalar votes can't see spatial structure. If the
+    #    thermal patch shows std > 0.05 (above the clear-sky ceiling of ~0.04),
+    #    refuse to declare high-confidence clear — fall through to the rest of
+    #    the cascade so the texture signal can route to cu/sc/ac_as.
+    has_texture = thermal_std is not None and thermal_std > 0.05
+    if n_scl >= 3 and n_w <= 1 and n_sc == 0 and not has_texture:
         twilight = sun_alt is not None and -18.0 <= sun_alt < -6.0
         sig = ", ".join(v[2] for v in strong_clear)
         weak_note = "" if n_w == 0 else f" (one boundary signal: {weak_cloud[0][2]})"
@@ -266,19 +247,37 @@ def classify(weak: dict[tuple, dict],
         return "clear", conf, f"{n_scl} signals strongly clear ({sig}){weak_note}"
 
     # 2. Local clear majority - TRUST THE THERMAL PATCH
-    #    Tie-break: if thermal is extremely clear (<2%), it gets extra weight to 
-    #    override a single noisy satellite 'cloud' vote.
-    thermal_veto = (thermal_mean_p is not None and thermal_mean_p < 0.02)
-    local_clear_wins = (local_scl >= 2) or (thermal_veto and local_scl >= 1)
-    if local_clear_wins and local_scl > local_cloud_evidence:
-        if rgb_nrbr_p95 is None or rgb_nrbr_p95 < -0.25:
-             return "clear", "medium", "local clear; regional cloud is sub-visual"
-        
-        if metar_okta is not None and metar_okta >= 6:
-            confident_cloud = False
-        else:
-            sig = ", ".join(v[2] for v in strong_clear if v[3])
-            return "clear", "medium", f"local says clear ({sig}); regional/weak signals disagree"
+    #    Two ways in:
+    #      (a) >= 2 local strong-clear signals beat local cloud evidence, OR
+    #      (b) thermal_veto (thermal_mean_p < 0.02): the patch has essentially
+    #          no warm pixels, so as long as no other LOCAL signal screams
+    #          cloud and texture is absent, trust it. Regional disagreement
+    #          (GOES/METAR) is a FOV mismatch, not a contradiction.
+    #
+    #    Comparison uses >= (not >) to avoid a weak vote tying and defeating
+    #    the local clear majority.
+    #
+    #    RGB veto: if the peak whiteness (nrbr_p95) is above -0.15, there are
+    #    pixels brighter than typical clear sky — fall through so cu/sc fire.
+    #    Between -0.35 and -0.15, the frame is "RGB-suspicious" — still return
+    #    clear, but at low confidence. Below -0.35 → medium confidence.
+    thermal_veto = (
+        thermal_mean_p is not None and thermal_mean_p < 0.02
+        and (thermal_std is None or thermal_std < 0.05)
+    )
+    veto_path = thermal_veto and local_sc == 0
+    majority_path = local_scl >= 2 and local_scl >= local_cloud_evidence
+    if veto_path or majority_path:
+        rgb_suspicious = rgb_nrbr_p95 is not None and rgb_nrbr_p95 > -0.15
+        metar_overcast = metar_okta is not None and metar_okta >= 6
+        if not rgb_suspicious and not metar_overcast:
+            sig = ", ".join(v[2] for v in strong_clear if v[3]) or f"thermal_p={thermal_mean_p:.2f}"
+            if rgb_nrbr_p95 is not None and rgb_nrbr_p95 > -0.35:
+                return "clear", "low", \
+                       f"local says clear ({sig}); RGB nrbr_p95={rgb_nrbr_p95:+.2f} hints at cloud — verify"
+            return "clear", "medium", \
+                   f"local says clear ({sig}); regional/weak signals disagree"
+        # else: fall through to cloud-evidence resolution — RGB or METAR contradicts.
 
     # 3. Cloud evidence dominates
     if n_sc >= 2 or (n_sc >= 1 and n_w >= 2):
