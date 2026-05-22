@@ -822,6 +822,11 @@ def main() -> None:
     labels_df = load_labels()
     labeled_ids = set(labels_df["frame_id"].astype(str))
 
+    # weak_mtime is used by both the sidebar filter (pre-rain candidates) and
+    # the per-frame block below. Defined once here so both share the same
+    # cache key — background re-fetches invalidate both views together.
+    weak_mtime = WEAK_LABELS_CSV.stat().st_mtime if WEAK_LABELS_CSV.exists() else 0.0
+
     with st.sidebar:
         st.title("Cloud labeler")
         st.caption(f"Source: `{root}/{pattern}`")
@@ -1000,10 +1005,8 @@ def main() -> None:
             help="Used by hard + contour styles. 0.5 = balanced; lower catches thin cloud, higher requires confidence.",
         ) if overlay_style in ("hard", "contour") else 0.5
 
-    # Cache key for weak labels — mtime in the key means background re-fetches
-    # show up without restarting the tool. Defined here (above both the review
-    # filter and the per-frame block) so both can use it.
-    weak_mtime = WEAK_LABELS_CSV.stat().st_mtime if WEAK_LABELS_CSV.exists() else 0.0
+    # (weak_mtime hoisted to top of main() — used by both sidebar filter
+    # and per-frame block.)
 
     with st.sidebar:
 
