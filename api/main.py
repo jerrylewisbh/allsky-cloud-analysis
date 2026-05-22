@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Depends, Request, Response
+from starlette.background import BackgroundTask
 from sqlalchemy.orm import Session
 from sqlalchemy import create_engine, func
 from . import models
@@ -25,6 +26,7 @@ LAT = float(os.getenv("LOCATION_LATITUDE", "51.05"))
 LON = float(os.getenv("LOCATION_LONGITUDE", "-114.07"))
 CWOP_ID = os.getenv("CWOP_ID", "")
 LPM_API_KEY = os.getenv("LPM_API_KEY", "")
+HA_WEBHOOK_URL = os.getenv("HA_WEBHOOK_URL", "")
 
 engine = create_engine(SQLALCHEMY_DATABASE_URL)
 
@@ -144,6 +146,22 @@ def send_to_cwop(raw_data, cwop_id, lat, lon, source="ESP32"):
         print(f"  CWOP Error: {e}")
         last_cwop_push_time = 0
 
+def forward_to_home_assistant(body: bytes, content_type: str):
+    # GW3000 supports only one push destination, so the API fans out the raw
+    # form body to HA's Ecowitt webhook. PASSKEY identifies the device on the
+    # HA side, so forward bytes verbatim rather than re-encoding a dict.
+    if not HA_WEBHOOK_URL:
+        return
+    try:
+        requests.post(
+            HA_WEBHOOK_URL,
+            data=body,
+            headers={"Content-Type": content_type or "application/x-www-form-urlencoded"},
+            timeout=5,
+        )
+    except Exception as e:
+        print(f"  HA forward error: {e}")
+
 def send_to_lpm(sensors, lpm_key):
     try:
         if not lpm_key: return
@@ -170,9 +188,23 @@ def calculate_ephemeris(dt):
 
 @app.middleware("http")
 async def ambient_weather_interceptor(request: Request, call_next):
-    full_url = str(request.url)
-    if "PASSKEY=" in full_url or "stationtype=" in full_url:
-        params = urllib.parse.parse_qs(full_url.split("?", 1)[-1])
+    # Inbound weather push. GW3000 uses Ecowitt protocol: POST with
+    # x-www-form-urlencoded body. Older Wunderground-style pushers use a
+    # GET with the same fields in the query string — support both.
+    body_bytes = b""
+    body_str = ""
+    content_type = request.headers.get("content-type", "")
+    if request.method == "POST" and "application/x-www-form-urlencoded" in content_type:
+        body_bytes = await request.body()
+        body_str = body_bytes.decode("utf-8", errors="replace")
+
+    qs = request.url.query or ""
+    payload_str = body_str if ("PASSKEY=" in body_str or "stationtype=" in body_str) else (
+        qs if ("PASSKEY=" in qs or "stationtype=" in qs) else ""
+    )
+
+    if payload_str:
+        params = urllib.parse.parse_qs(payload_str)
         data = {k: v[0] for k, v in params.items()}
         if data:
             db = Session(bind=engine)
@@ -181,7 +213,15 @@ async def ambient_weather_interceptor(request: Request, call_next):
                 db.commit()
                 # Use ONLY Ambient Weather for CWOP pushes
                 if CWOP_ID: send_to_cwop(data, CWOP_ID, LAT, LON, source="AmbientWeather")
-                return Response(content='{"status":"success"}', media_type="application/json")
+                # Fan out to HA after the response flushes — never block the station.
+                bg = None
+                if HA_WEBHOOK_URL and body_bytes:
+                    bg = BackgroundTask(forward_to_home_assistant, body_bytes, content_type)
+                return Response(
+                    content='{"status":"success"}',
+                    media_type="application/json",
+                    background=bg,
+                )
             except: pass
             finally: db.close()
     return await call_next(request)
