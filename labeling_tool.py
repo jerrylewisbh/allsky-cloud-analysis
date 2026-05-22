@@ -700,6 +700,88 @@ def compute_matching_ids(
     return frozenset(out)
 
 
+@st.cache_data(show_spinner="Mining pre-rain candidates...")
+def compute_pre_rain_candidates(
+    frame_ids: tuple[str, ...],
+    weak_csv: str, weak_mtime: float,
+    window_minutes: int = 60,
+) -> frozenset[str]:
+    """Find frames within `window_minutes` BEFORE a rain-onset event AND
+    showing cloud signature (GOES cloud_present=1 + phase ice/mixed +
+    height > 5 km).
+
+    These are the high-value "ns_cb cloud overhead, lens still clean" frames
+    for breaking the rain_on_lens confound — same physical regime as wet-lens
+    ns_cb frames but without the lens artifact, so models trained on them
+    learn cloud structure rather than raindrops on glass.
+
+    Returns empty set if no rain events in the data.
+    """
+    import bisect
+    weak = load_weak_labels(weak_csv, weak_mtime)
+
+    # (timestamp, frame_id, rain_mm) sorted by time
+    records: list[tuple[dt.datetime, str, float]] = []
+    for fid in frame_ids:
+        ts = parse_timestamp(fid)
+        if ts is None:
+            continue
+        wf = weak.get(fid, {})
+        rain_row = wf.get(("weather_station", "rain_1h_mm"))
+        if rain_row is None:
+            continue
+        try:
+            rain_mm = float(rain_row["value"])
+        except (ValueError, TypeError):
+            continue
+        records.append((ts, fid, rain_mm))
+    records.sort(key=lambda r: r[0])
+
+    # Find rain-onset timestamps: prev ≤ 0.01 mm and current > 0.01 mm.
+    # rain_1h_mm is cumulative over the past hour, so the leading edge is
+    # the first frame where it transitions to non-zero.
+    THRESHOLD = 0.01
+    onset_times = [
+        records[i][0]
+        for i in range(1, len(records))
+        if records[i - 1][2] <= THRESHOLD and records[i][2] > THRESHOLD
+    ]
+    if not onset_times:
+        return frozenset()
+
+    # For each onset, collect frame_ids in (onset - window, onset)
+    # with GOES cloud signature confirming the cloud is already overhead.
+    record_times = [r[0] for r in records]
+    window = dt.timedelta(minutes=window_minutes)
+    candidates: set[str] = set()
+    for onset in onset_times:
+        lo = bisect.bisect_left(record_times, onset - window)
+        hi = bisect.bisect_left(record_times, onset)
+        for idx in range(lo, hi):
+            fid = records[idx][1]
+            wf = weak.get(fid, {})
+
+            # GOES says cloud_present=1
+            goes_present = wf.get(("goes19_acmc", "cloud_present"))
+            if goes_present is None or str(goes_present.get("value")) != "1":
+                continue
+            # Phase ice or mixed (water-only is more often Cu/Sc, not ns_cb)
+            goes_phase = wf.get(("goes19_actpc", "cloud_top_phase"))
+            if goes_phase is None or goes_phase.get("value") not in ("ice", "mixed"):
+                continue
+            # Cloud top above 5 km (ns_cb has deep structure)
+            goes_height = wf.get(("goes19_achac", "cloud_top_height_m"))
+            if goes_height is None:
+                continue
+            try:
+                if float(goes_height["value"]) < 5000:
+                    continue
+            except (ValueError, TypeError):
+                continue
+            candidates.add(fid)
+    return frozenset(candidates)
+
+
 def advance(pairs: list[dict], labeled_ids: set[str], direction: int,
             skip_labeled: bool, review_filter=None) -> int:
     i = st.session_state.idx
@@ -824,6 +906,31 @@ def main() -> None:
             help="Substring match on frame_id (case-insensitive). Useful for "
                  "jumping to a specific date prefix like `20260519_10` or to "
                  "the exact frame from a disagreement report.",
+        )
+
+        st.markdown("**Special queues** — targeted labeling missions")
+        pre_rain_only = st.checkbox(
+            "Pre-rain ns_cb candidates (lens-clean)",
+            value=False,
+            help=(
+                "Frames in the 60-minute window BEFORE a rain-onset event AND "
+                "with GOES already showing high ice/mixed cloud overhead "
+                "(top > 5 km). These are the rare 'ns_cb cloud overhead, lens "
+                "still dry' frames — high-value for breaking the 100% "
+                "ns_cb↔rain_on_lens correlation that would otherwise teach a "
+                "CNN to predict ns_cb from raindrops-on-glass rather than "
+                "cloud structure. Label these as `ns_cb` with "
+                "`rain_on_lens=False` to give downstream models a clean "
+                "training/eval subset."
+            ),
+        )
+        pre_rain_window_min = st.number_input(
+            "Pre-rain lookback (min)",
+            min_value=10, max_value=240, value=60, step=10,
+            disabled=not pre_rain_only,
+            help="How far back from each rain-onset to search. Shorter = tighter "
+                 "to onset (more chance lens is still dry). Longer = more "
+                 "candidates but possibly less ns_cb-like cloud structure.",
         )
 
         colormap_name = st.selectbox(
@@ -965,7 +1072,8 @@ def main() -> None:
     review_filter = None
     any_filter_active = (wanted_confidences is not None or wanted_classes is not None
                          or wanted_regimes is not None or wanted_hand_classes is not None
-                         or bool(id_substring) or date_filter != "any" or day_night_filter != "any")
+                         or bool(id_substring) or date_filter != "any" or day_night_filter != "any"
+                         or pre_rain_only)
     if any_filter_active:
         # One sweep over the cached auto/weak/hand indices. No PIL I/O, no
         # live auto_classify fallback — frames missing from auto_labels.csv
@@ -980,6 +1088,14 @@ def main() -> None:
             date_prefix=(None if date_filter == "any" else date_filter),
             day_night_mode=day_night_filter,
         )
+
+        if pre_rain_only:
+            pre_rain_ids = compute_pre_rain_candidates(
+                tuple(p["frame_id"] for p in pairs),
+                str(WEAK_LABELS_CSV), weak_mtime,
+                window_minutes=int(pre_rain_window_min),
+            )
+            matching_ids = matching_ids & pre_rain_ids
 
         def review_filter(p, _ids=matching_ids):
             return p["frame_id"] in _ids
@@ -1000,6 +1116,8 @@ def main() -> None:
             filter_desc.append(f"hand_class={','.join(sorted(wanted_hand_classes))}")
         if id_substring:
             filter_desc.append(f"id~{id_substring!r}")
+        if pre_rain_only:
+            filter_desc.append(f"pre_rain≤{int(pre_rain_window_min)}min")
         st.sidebar.caption(
             f"**Filter ({' · '.join(filter_desc)}): {n_match} of {len(pairs)} frames match** "
             f"({100 * n_match / max(len(pairs), 1):.1f}%)."
