@@ -40,6 +40,10 @@ from __future__ import annotations
 from typing import Optional
 
 CLASSES = ["clear", "ci", "cs_cc", "ac_as", "cu", "sc", "st", "ns_cb", "multi"]
+# The classifier may also emit "unknown" when signals can't be reconciled
+# (vote cascade fails, family logic falls through, etc.). "unknown" is NOT
+# a hand-label option — it's a fallback that means "labeler should decide".
+# Kept distinct from "multi" so the diagnostic doesn't conflate them.
 
 
 def _get(weak: dict, source: str, attr: str,
@@ -299,7 +303,7 @@ def classify(weak: dict[tuple, dict],
     else:
         cl_src = [v[0] for v in strong_cloud] + [f"~{v[0]}" for v in weak_cloud]
         cr_src = [v[0] for v in strong_clear]
-        return "multi", "low", f"signals split cloud={cl_src} clear={cr_src}"
+        return "unknown", "low", f"signals split cloud={cl_src} clear={cr_src}"
 
     # ---- Rule 4: deep convection (CB) via METAR genus ----
     cb_in_metar = metar_genus in ("CB", "TCU")
@@ -335,7 +339,7 @@ def classify(weak: dict[tuple, dict],
         family_reason = f"METAR bucket → {family}"
 
     if family is None:
-        return "multi", "low", "cloud present but altitude family unknown"
+        return "unknown", "low", "cloud present but altitude family unknown"
 
     base_conf = "medium" if confident_cloud else "low"
     reasoning_bits = [family_reason]
@@ -372,7 +376,7 @@ def classify(weak: dict[tuple, dict],
                 f"day + METAR {metar_okta}/8 scattered + CSI {csi:.2f} → Cu over Sc"])
         return "sc", "low", "; ".join(reasoning_bits + ["Cu vs Sc needs RGB texture"])
 
-    return "multi", "low", "fell through family rules"
+    return "unknown", "low", "fell through family rules"
 
 
 if __name__ == "__main__":

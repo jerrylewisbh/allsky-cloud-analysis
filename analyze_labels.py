@@ -121,6 +121,12 @@ def section_overall(out, merged: pd.DataFrame, hand: pd.DataFrame,
     n_match = int((merged["class_hand"] == merged["auto_class"]).sum())
     print(f"\n  Exact-match agreement: {n_match}/{len(merged)} = "
           f"{100 * n_match / len(merged):.1f}%", file=out)
+    n_unknown = int((auto["auto_class"] == "unknown").sum())
+    if n_unknown:
+        n_unknown_in_merged = int((merged["auto_class"] == "unknown").sum())
+        print(f"  Classifier punted (auto=unknown): {n_unknown} total "
+              f"({n_unknown_in_merged} in matched set) — these are signal-disagreement "
+              "frames, prime active-learning targets.", file=out)
 
 
 def section_per_class(out, merged: pd.DataFrame) -> None:
@@ -153,7 +159,10 @@ def section_confusion(out, merged: pd.DataFrame) -> None:
     _section(out, "3. CONFUSION MATRIX (rows = hand truth, cols = auto pred)")
     cm = pd.crosstab(merged["class_hand"], merged["auto_class"],
                      rownames=[""], colnames=[""], dropna=False)
-    cm = cm.reindex(index=CLASSES, columns=CLASSES, fill_value=0)
+    # Include "unknown" as a column — those are frames the classifier punted
+    # on (signal disagreement, no family resolution). Keep it separate from
+    # taxonomy "multi" so the diagnostic doesn't conflate them.
+    cm = cm.reindex(index=CLASSES, columns=CLASSES + ["unknown"], fill_value=0)
     cm["TOTAL"] = cm.sum(axis=1)
     cm.loc["TOTAL"] = cm.sum(axis=0)
     # render with hand=row totals so it's obvious where errors live

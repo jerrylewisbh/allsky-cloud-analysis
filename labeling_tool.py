@@ -1115,9 +1115,17 @@ def main() -> None:
         v = str(ex[col]) if ex is not None else None
         return values.index(v) if v in values else default
 
-    # Default class = existing hand label if present, else auto_label
-    default_class_idx = (existing_index(CLASSES, "class") if has_existing
-                        else (CLASSES.index(auto_label) if auto_label in CLASSES else 0))
+    # Default class = existing hand label if present, else auto_label.
+    # When auto says "unknown" (classifier punted), pre-select "multi" so the
+    # labeler isn't misled into a confident "clear" — they still verify.
+    if has_existing:
+        default_class_idx = existing_index(CLASSES, "class")
+    elif auto_label in CLASSES:
+        default_class_idx = CLASSES.index(auto_label)
+    elif auto_label == "unknown":
+        default_class_idx = CLASSES.index("multi")
+    else:
+        default_class_idx = 0
     default_conf_idx = (existing_index(CONFIDENCES, "confidence") if has_existing
                        else (CONFIDENCES.index(auto_conf) if auto_conf in CONFIDENCES else 0))
 
