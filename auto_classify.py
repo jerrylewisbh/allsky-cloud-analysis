@@ -122,7 +122,10 @@ def classify(weak: dict[tuple, dict],
     # safe floor for "structured". The mean lower bound is dropped because
     # broken Cu against a narrow thermal FOV often has very low overall
     # mean_p (~0.04) — the texture is in the std, not the mean.
-    high_family_from_goes = (goes_height is not None and goes_height >= 6000)
+    # High-family threshold is 7000m (not 6000m): at mid-latitudes Ac tops
+    # can reach 5-7 km in spring/summer, while genuine Ci typically lives at
+    # 8 km+. The 6 km cutoff routed too many Ac frames to cs_cc.
+    high_family_from_goes = (goes_height is not None and goes_height >= 7000)
     if (not high_family_from_goes
             and thermal_std is not None and thermal_std > 0.07
             and thermal_mean_p is not None and thermal_mean_p < 0.70):
@@ -145,7 +148,7 @@ def classify(weak: dict[tuple, dict],
     # ---- Rule 1: active precipitation suggests ns_cb ----
     if rain_mm is not None and rain_mm > 0.5:
         cb_signature = (goes_phase == "ice"
-                        and goes_height is not None and goes_height > 6000
+                        and goes_height is not None and goes_height > 7000
                         and humidity is not None and humidity > 90)
         if cb_signature:
             return "ns_cb", "high", \
@@ -156,7 +159,7 @@ def classify(weak: dict[tuple, dict],
 
     # ---- Rule 2: targeted high-ice Ci (locals can't see thin cirrus) ----
     if (goes_phase == "ice"
-            and goes_height is not None and goes_height > 6000
+            and goes_height is not None and goes_height > 7000
             and goes_mask == 1
             and metar_okta is not None and metar_okta <= 3
             and thermal_mean_p is not None and thermal_mean_p < 0.15):
@@ -319,7 +322,7 @@ def classify(weak: dict[tuple, dict],
     cb_signals_strong = (cb_in_metar
                          and confident_cloud
                          and goes_phase in ("mixed", "ice")
-                         and goes_height is not None and goes_height > 6000)
+                         and goes_height is not None and goes_height > 7000)
     if cb_signals_strong:
         return "ns_cb", "medium", \
                f"METAR {metar_genus} + GOES {goes_phase} top {goes_height:.0f}m"
@@ -337,7 +340,7 @@ def classify(weak: dict[tuple, dict],
         elif goes_height < 2000:
             family = "low"
             family_reason = f"GOES height {goes_height:.0f}m → {family}"
-        elif goes_height < 6000:
+        elif goes_height < 7000:
             family = "mid"
             family_reason = f"GOES height {goes_height:.0f}m → {family}"
         else:
