@@ -148,7 +148,12 @@ def classify(weak: dict[tuple, dict],
             return "cu", "low", f"visually stark white peak (nrbr_p95={rgb_nrbr_p95:+.2f}) → likely sparse Cu"
 
     # ---- Rule 1: active precipitation suggests ns_cb ----
-    if rain_mm is not None and rain_mm > 0.5:
+    # 0.1 mm threshold (was 0.5): tipping-bucket gauges lag actual onset by
+    # 10-15 minutes — the first wave of rain often reads 0.0-0.4 mm even
+    # with visible droplets on the lens. Lowering catches the active-rain
+    # regime earlier so the trailing-edge storm frames don't get routed to
+    # sc/cs_cc when they're still ns_cb.
+    if rain_mm is not None and rain_mm > 0.1:
         cb_signature = (goes_phase == "ice"
                         and goes_height is not None and goes_height > 7000
                         and humidity is not None and humidity > 90)
@@ -157,7 +162,7 @@ def classify(weak: dict[tuple, dict],
                    (f"rain {rain_mm:.1f}mm + GOES ice top {goes_height:.0f}m + "
                     f"humidity {humidity:.0f}% → deep convective ns_cb")
         return "ns_cb", "medium", \
-               f"rain_1h_mm={rain_mm:.1f} > 0.5 (visual genus may differ — verify)"
+               f"rain_1h_mm={rain_mm:.2f} > 0.1 (visual genus may differ — verify)"
 
     # ---- Rule 2: targeted high-ice Ci (locals can't see thin cirrus) ----
     if (goes_phase == "ice"
