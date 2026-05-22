@@ -138,6 +138,13 @@ def classify(weak: dict[tuple, dict],
                    f"night broken-cloud texture ({texture_note}) → Ac/broken Sc"
         # twilight: ambiguous, fall through to vote cascade
 
+    # ---- Rule 0.5: Visual Puff detector (daytime only) ----
+    # Catch small, bright white Cumulus puffs that are too sparse to trigger 
+    # Rule 0 texture but are visually stark in RGB.
+    if is_day and rgb_nrbr_p95 is not None and rgb_nrbr_p95 > 0.0:
+        if thermal_mean_p is not None and thermal_mean_p < 0.30:
+            return "cu", "low", f"visually stark white peak (nrbr_p95={rgb_nrbr_p95:+.2f}) → likely sparse Cu"
+
     # ---- Rule 1: active precipitation suggests ns_cb ----
     if rain_mm is not None and rain_mm > 0.5:
         cb_signature = (goes_phase == "ice"
@@ -288,6 +295,12 @@ def classify(weak: dict[tuple, dict],
 
     # 4. Truly mixed
     else:
+        # Special case: 'Invisible Cloud' mismatch. 
+        # If local says clear and RGB camera DOES NOT see a cloud peak,
+        # then even if GOES/METAR say cloud, it's sub-visual. Label clear low.
+        if local_scl >= 2 and (rgb_nrbr_p95 is None or rgb_nrbr_p95 < -0.25):
+             return "clear", "low", "local clear; sub-visual regional cloud"
+
         cl_src = [v[0] for v in strong_cloud] + [f"~{v[0]}" for v in weak_cloud]
         cr_src = [v[0] for v in strong_clear]
         return "multi", "low", f"signals split cloud={cl_src} clear={cr_src}"
@@ -311,8 +324,15 @@ def classify(weak: dict[tuple, dict],
         elif goes_height < 6000:
             family = "mid"
         else:
-            family = "high"
-        family_reason = f"GOES height {goes_height:.0f}m → {family}"
+            # High according to GOES (>6km). BUT if the thermal signal is 
+            # strong/opaque, it's often a textured Mid-cloud deck (Ac) that 
+            # the satellite is slightly over-estimating or hitting a high peak on.
+            if thermal_mean_p is not None and thermal_mean_p > 0.40:
+                family = "mid"
+                family_reason = f"GOES height {goes_height:.0f}m but thermal opacity suggests {family}"
+            else:
+                family = "high"
+                family_reason = f"GOES height {goes_height:.0f}m → {family}"
     elif metar_bucket in ("low", "mid", "high"):
         family = metar_bucket
         family_reason = f"METAR bucket → {family}"
