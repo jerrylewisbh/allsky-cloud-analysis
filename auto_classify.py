@@ -110,18 +110,6 @@ def classify(weak: dict[tuple, dict],
     csi_std = _get(weak, "derived", "csi_std_10min", as_float=True)
 
     # ---- Rule 0: thermal spatial-variance texture (overrides clear cascade) ----
-    # Clear sky and overcast sheets both have low spatial std in the thermal
-    # mask (uniform cold / uniform warm). High std means warm puffs against
-    # cold gaps, i.e. discrete cloud elements (Cu fragments, broken Sc/Ac).
-    # Combined with a mid-range mean, this is a confident "broken-cloud"
-    # signature that the per-frame vote cascade can't see — the cascade
-    # operates on the SCALAR mean. METAR okta then disambiguates Cu (scattered)
-    # from broken Sc (more coverage).
-    #
-    # Guard: only fire when GOES height is unknown OR puts the cloud in
-    # low/mid family (<6km). At high family the "texture" is more often
-    # patchy cirrus (Ci) than convective Cu — observed v1: 7 hand-ci
-    # frames got mis-predicted as cu by this rule when GOES top was >6km.
     high_family_from_goes = (goes_height is not None and goes_height >= 6000)
     if (not high_family_from_goes
             and thermal_std is not None and thermal_std > 0.10
@@ -136,11 +124,8 @@ def classify(weak: dict[tuple, dict],
         if is_night:
             return "ac_as", "medium", \
                    f"night broken-cloud texture ({texture_note}) → Ac/broken Sc"
-        # twilight: ambiguous, fall through to vote cascade
 
     # ---- Rule 0.5: Visual Puff detector (daytime only) ----
-    # Catch small, bright white Cumulus puffs that are too sparse to trigger 
-    # Rule 0 texture but are visually stark in RGB.
     if is_day and rgb_nrbr_p95 is not None and rgb_nrbr_p95 > 0.0:
         if thermal_mean_p is not None and thermal_mean_p < 0.30:
             return "cu", "low", f"visually stark white peak (nrbr_p95={rgb_nrbr_p95:+.2f}) → likely sparse Cu"
@@ -281,7 +266,14 @@ def classify(weak: dict[tuple, dict],
         return "clear", conf, f"{n_scl} signals strongly clear ({sig}){weak_note}"
 
     # 2. Local clear majority - TRUST THE THERMAL PATCH
-    if local_scl >= 2 and local_scl > local_cloud_evidence:
+    #    Tie-break: if thermal is extremely clear (<2%), it gets extra weight to 
+    #    override a single noisy satellite 'cloud' vote.
+    thermal_veto = (thermal_mean_p is not None and thermal_mean_p < 0.02)
+    local_clear_wins = (local_scl >= 2) or (thermal_veto and local_scl >= 1)
+    if local_clear_wins and local_scl > local_cloud_evidence:
+        if rgb_nrbr_p95 is None or rgb_nrbr_p95 < -0.25:
+             return "clear", "medium", "local clear; regional cloud is sub-visual"
+        
         if metar_okta is not None and metar_okta >= 6:
             confident_cloud = False
         else:
@@ -295,12 +287,6 @@ def classify(weak: dict[tuple, dict],
 
     # 4. Truly mixed
     else:
-        # Special case: 'Invisible Cloud' mismatch. 
-        # If local says clear and RGB camera DOES NOT see a cloud peak,
-        # then even if GOES/METAR say cloud, it's sub-visual. Label clear low.
-        if local_scl >= 2 and (rgb_nrbr_p95 is None or rgb_nrbr_p95 < -0.25):
-             return "clear", "low", "local clear; sub-visual regional cloud"
-
         cl_src = [v[0] for v in strong_cloud] + [f"~{v[0]}" for v in weak_cloud]
         cr_src = [v[0] for v in strong_clear]
         return "multi", "low", f"signals split cloud={cl_src} clear={cr_src}"
@@ -319,20 +305,21 @@ def classify(weak: dict[tuple, dict],
     family = None
     family_reason = ""
     if goes_height is not None and goes_height > 0:
-        if goes_height < 2000:
+        if thermal_mean_p is not None and thermal_mean_p > 0.60:
             family = "low"
+            family_reason = f"GOES height {goes_height:.0f}m but high opacity suggests {family}"
+        elif thermal_mean_p is not None and thermal_mean_p > 0.40 and goes_height > 2000:
+            family = "mid"
+            family_reason = f"GOES height {goes_height:.0f}m but moderate opacity suggests {family}"
+        elif goes_height < 2000:
+            family = "low"
+            family_reason = f"GOES height {goes_height:.0f}m → {family}"
         elif goes_height < 6000:
             family = "mid"
+            family_reason = f"GOES height {goes_height:.0f}m → {family}"
         else:
-            # High according to GOES (>6km). BUT if the thermal signal is 
-            # strong/opaque, it's often a textured Mid-cloud deck (Ac) that 
-            # the satellite is slightly over-estimating or hitting a high peak on.
-            if thermal_mean_p is not None and thermal_mean_p > 0.40:
-                family = "mid"
-                family_reason = f"GOES height {goes_height:.0f}m but thermal opacity suggests {family}"
-            else:
-                family = "high"
-                family_reason = f"GOES height {goes_height:.0f}m → {family}"
+            family = "high"
+            family_reason = f"GOES height {goes_height:.0f}m → {family}"
     elif metar_bucket in ("low", "mid", "high"):
         family = metar_bucket
         family_reason = f"METAR bucket → {family}"
@@ -367,6 +354,8 @@ def classify(weak: dict[tuple, dict],
         if is_day and csi_std is not None and csi_std > 0.10:
             return "cu", "medium", "; ".join(reasoning_bits + [
                 f"day + CSI 10-min std={csi_std:.2f} (convective shading) → Cu"])
+        if thermal_mean_p is not None and thermal_mean_p > 0.50:
+            return "sc", "medium", "; ".join(reasoning_bits + ["low opaque deck → Sc"])
         if (is_day and metar_okta is not None and 1 <= metar_okta <= 4
                 and csi is not None and 0.55 <= csi <= 1.05):
             return "cu", "low", "; ".join(reasoning_bits + [
@@ -377,5 +366,4 @@ def classify(weak: dict[tuple, dict],
 
 
 if __name__ == "__main__":
-    # Test cases removed for brevity — script is primarily for logic export.
     pass
