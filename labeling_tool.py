@@ -867,18 +867,47 @@ def main() -> None:
         st.divider()
         st.subheader("Jump")
         
-        if st.button("🎲 Random Unlabeled", use_container_width=True):
-            unlabeled_indices = [
-                i for i, p in enumerate(pairs) 
-                if p["frame_id"] not in labeled_ids
-            ]
-            if unlabeled_indices:
-                import random
-                st.session_state.idx = random.choice(unlabeled_indices)
+        if st.button("🎲 Random Unlabeled (balanced)", use_container_width=True,
+                     help="Picks an unlabeled frame, weighted toward auto-classes "
+                          "you've hand-confirmed least often — so the queue fills "
+                          "the gaps in your label distribution instead of "
+                          "oversampling whatever the auto-classifier sees most."):
+            import random
+            from collections import Counter, defaultdict
+
+            random_auto_mtime = (
+                AUTO_LABELS_CSV.stat().st_mtime if AUTO_LABELS_CSV.exists() else 0.0
+            )
+            random_auto_index = load_auto_labels(
+                str(AUTO_LABELS_CSV), random_auto_mtime
+            )
+
+            buckets: dict[str, list[int]] = defaultdict(list)
+            for i, p in enumerate(pairs):
+                if p["frame_id"] in labeled_ids:
+                    continue
+                ac = random_auto_index.get(p["frame_id"], {}).get("auto_class") \
+                    or "_unknown"
+                buckets[ac].append(i)
+
+            if not buckets:
+                st.sidebar.success("All frames have been labeled!")
+            else:
+                hand_counts = Counter(labels_df["class"].astype(str))
+                # Inverse-frequency weight: a class with 0 hand labels gets
+                # weight 1.0; one with 50 gets ~0.02. The +1 keeps it finite.
+                weights = {
+                    cls: 1.0 / (1 + hand_counts.get(cls, 0))
+                    for cls in buckets
+                }
+                chosen = random.choices(
+                    list(weights.keys()),
+                    weights=list(weights.values()),
+                    k=1,
+                )[0]
+                st.session_state.idx = random.choice(buckets[chosen])
                 st.session_state.frame_started_at = time.time()
                 st.rerun()
-            else:
-                st.sidebar.success("All frames have been labeled!")
 
         idx_input = st.number_input(
             "Frame index", min_value=0, max_value=len(pairs) - 1,
