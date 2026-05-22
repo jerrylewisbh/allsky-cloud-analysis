@@ -378,11 +378,16 @@ def classify(weak: dict[tuple, dict],
         if metar_genus in ("CU", "TCU"):
             return "cu", "medium", "; ".join(
                 reasoning_bits + [f"METAR genus {metar_genus}"])
+        # Opacity outranks CSI variability: a uniformly cloud-covered thermal
+        # patch (mean > 0.50) is a deck (Sc), even if CSI fluctuates. The CSI
+        # std → Cu inference only holds when the patch shows gaps (mean < 0.50);
+        # otherwise the variability is thickness changes in a continuous deck.
+        if thermal_mean_p is not None and thermal_mean_p > 0.50:
+            return "sc", "medium", "; ".join(reasoning_bits + [
+                f"low opaque deck (thermal_p={thermal_mean_p:.2f}) → Sc"])
         if is_day and csi_std is not None and csi_std > 0.10:
             return "cu", "medium", "; ".join(reasoning_bits + [
                 f"day + CSI 10-min std={csi_std:.2f} (convective shading) → Cu"])
-        if thermal_mean_p is not None and thermal_mean_p > 0.50:
-            return "sc", "medium", "; ".join(reasoning_bits + ["low opaque deck → Sc"])
         if (is_day and metar_okta is not None and 1 <= metar_okta <= 4
                 and csi is not None and 0.55 <= csi <= 1.05):
             return "cu", "low", "; ".join(reasoning_bits + [
