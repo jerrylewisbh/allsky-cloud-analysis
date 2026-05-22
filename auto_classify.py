@@ -122,8 +122,8 @@ def classify(weak: dict[tuple, dict],
     # frames got mis-predicted as cu by this rule when GOES top was >6km.
     high_family_from_goes = (goes_height is not None and goes_height >= 6000)
     if (not high_family_from_goes
-            and thermal_std is not None and thermal_std > 0.20
-            and thermal_mean_p is not None and 0.15 < thermal_mean_p < 0.65):
+            and thermal_std is not None and thermal_std > 0.10
+            and thermal_mean_p is not None and 0.05 < thermal_mean_p < 0.70):
         texture_note = f"thermal std={thermal_std:.2f} mean={thermal_mean_p:.2f}"
         if is_day:
             if metar_okta is not None and metar_okta >= 5:
