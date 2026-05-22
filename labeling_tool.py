@@ -781,12 +781,14 @@ def main() -> None:
         )
         class_filter = st.selectbox(
             "Auto-label class",
-            ["any"] + CLASSES,
+            ["any"] + CLASSES + ["unknown"],
             index=0,
             help=(
                 "Narrow to frames where the auto-classifier predicted a specific "
                 "class. Pairs with the confidence filter — e.g. **class=clear + "
-                "confidence=high** validates the high-conf clear predictions."
+                "confidence=high** validates the high-conf clear predictions. "
+                "**unknown** = the classifier punted (signal disagreement) — "
+                "these are the highest-value frames for active learning."
             ),
         )
         regime_filter = st.multiselect(
