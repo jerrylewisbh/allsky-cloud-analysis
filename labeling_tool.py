@@ -281,7 +281,7 @@ def render_context_panel(weak: dict[tuple, dict]) -> None:
     regime = _sun_regime(sun_alt) if sun_alt is not None else "?"
 
     csi = val("derived", "daytime_clear_sky_index")
-    mpsas = val("esp32_sensor", "sky_brightness_mpsas")
+    lux = val("esp32_sensor", "illuminance_lux")
     solar = val("weather_station", "solar_irradiance_wm2")
     humidity = val("weather_station", "humidity_pct")
     pressure = val("weather_station", "pressure_hpa")
@@ -304,8 +304,8 @@ def render_context_panel(weak: dict[tuple, dict]) -> None:
                                 help="Clear-Sky Index from AWNET solarradiation vs Haurwitz clear-sky model")
         headline_cols[2].metric("Solar W/m²", f"{solar:.0f}" if solar is not None else "—")
     else:
-        headline_cols[1].metric("mpsas (lower=brighter)", f"{mpsas:.2f}" if mpsas is not None else "—",
-                                help="ESP SQM — clouds over Calgary reflect city skyglow back, lowering mpsas")
+        headline_cols[1].metric("Lux (higher=cloudier)", f"{lux:.3f}" if lux is not None else "—",
+                                help="ESP Lux — clouds over Calgary reflect city skyglow back, increasing lux")
         headline_cols[2].metric("Moon", f"{moon_alt:.0f}°  {moon_phase:.0f}%" if moon_alt is not None else "—",
                                 help="moon altitude · phase. Below horizon = dark; above = scattered moonlight changes RGB")
 
@@ -335,7 +335,7 @@ def render_context_panel(weak: dict[tuple, dict]) -> None:
     elif regime in ("TWILIGHT", "NAUTICAL"):
         regime_note = "Twilight: both RGB and thermal carry info but neither is fully reliable. Cross-check with METAR genus hint."
     else:
-        regime_note = "Nighttime: RGB is moonless or marginal — trust thermal + mpsas. Cu/Sc invisible without moonlight."
+        regime_note = "Nighttime: RGB is moonless or marginal — trust thermal + lux. Cu/Sc invisible without moonlight."
     st.caption(f"**{regime_note}**  ·  METAR sees the whole hemisphere from the airport; your crop is a ~75° patch — disagreement is expected.")
 
     # Expandable details
@@ -613,22 +613,24 @@ def _rgb_and_valid(rgb_path: str, mask_path: str):
     return rgb, valid
 
 
-def rgb_nrbr_mean(rgb_path: str, mask_path: str) -> float | None:
-    """Mean (R-B)/(R+B) over thermal-valid pixels — daytime cloud cue."""
+def rgb_nrbr_p95(rgb_path: str, mask_path: str) -> float | None:
+    """95th percentile of (R-B)/(R+B) over thermal-valid pixels — daytime cloud peak cue."""
     rgb, valid = _rgb_and_valid(rgb_path, mask_path)
     if rgb is None or valid is None:
         return None
     r = rgb[..., 0][valid]
     b = rgb[..., 2][valid]
-    return float(((r - b) / (r + b + 1e-6)).mean())
+    nrbr = (r - b) / (r + b + 1e-6)
+    return float(np.percentile(nrbr, 95))
 
 
-def rgb_v_mean(rgb_path: str, mask_path: str) -> float | None:
-    """Mean HSV V over thermal-valid pixels — nighttime cloud cue."""
+def rgb_v_stats(rgb_path: str, mask_path: str) -> tuple[float | None, float | None]:
+    """Mean and STD of HSV V over thermal-valid pixels — nighttime cloud cue."""
     rgb, valid = _rgb_and_valid(rgb_path, mask_path)
     if rgb is None or valid is None:
-        return None
-    return float(rgb.max(axis=-1)[valid].mean())
+        return None, None
+    v_channel = rgb.max(axis=-1)[valid]
+    return float(v_channel.mean()), float(v_channel.std())
 
 
 @st.cache_data(show_spinner=False)
@@ -991,14 +993,15 @@ def main() -> None:
     ts_str = ts.strftime("%Y-%m-%d %H:%M:%S UTC") if ts else "(no timestamp)"
     mean_p, frac_50, nodata_frac, std_p = thermal_cloud_stats(pair["mask_path"])
 
-    # Compute auto-label using all weak labels + local thermal + RGB NRBR (day) + RGB V (night)
+    # Compute auto-label using all weak labels + local thermal + RGB peak (day) + RGB V (night)
     # (weak_mtime hoisted above the sidebar so the review filter can use it too)
     weak_for_frame = load_weak_labels(str(WEAK_LABELS_CSV), weak_mtime).get(pair["frame_id"], {})
-    nrbr = rgb_nrbr_mean(pair["rgb_path"], pair["mask_path"])
-    v_mean = rgb_v_mean(pair["rgb_path"], pair["mask_path"])
+    nrbr_p95 = rgb_nrbr_p95(pair["rgb_path"], pair["mask_path"])
+    v_mean, v_std = rgb_v_stats(pair["rgb_path"], pair["mask_path"])
     auto_label, auto_conf, auto_reason = auto_classify(
         weak_for_frame, thermal_mean_p=mean_p,
-        rgb_nrbr_mean=nrbr, rgb_v_mean=v_mean,
+        rgb_nrbr_p95=nrbr_p95, rgb_v_mean=v_mean,
+        rgb_v_std=v_std,
         thermal_std=std_p,
     )
 

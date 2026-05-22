@@ -29,6 +29,7 @@ import argparse
 import json
 import os
 import time
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator
@@ -37,9 +38,9 @@ import cv2
 import numpy as np
 
 # ---- physics thresholds (mirror docs/sky-condition.md and firmware) ----
-ABS_THRESHOLD_C = -5.0       # warmer than this absolute => cloud
-REL_DELTA_C = -10.0          # warmer than (ambient + REL_DELTA) => cloud
-SIGMOID_SIGMA_C = 3.0        # softness of the cloud transition (°C)
+ABS_THRESHOLD_C = -18.0      # warmer than this absolute => cloud
+REL_DELTA_C = -20.0          # warmer than (ambient + REL_DELTA) => cloud
+SIGMOID_SIGMA_C = 6.0        # softness of the cloud transition (°C)
 
 # ---- day / night handling (lux from sensors block) ----
 LUX_NIGHT = 1.0              # below: thermal-only
@@ -283,6 +284,21 @@ def process_frame(fp: FramePaths, config: dict) -> dict | None:
     }
 
 
+def worker(fp: FramePaths, config: dict, out_root: Path):
+    try:
+        result = process_frame(fp, config)
+        if result is None:
+            return fp.frame_id, False, "Skipped"
+
+        cv2.imwrite(str(out_root / "images" / f"{fp.frame_id}.jpg"), result["img"])
+        cv2.imwrite(str(out_root / "masks" / f"{fp.frame_id}.png"), result["mask"])
+        with open(out_root / "meta" / f"{fp.frame_id}.json", "w") as f:
+            json.dump(result["meta"], f, indent=2)
+        return fp.frame_id, True, None
+    except Exception as e:
+        return fp.frame_id, False, str(e)
+
+
 def main():
     # Default config + NAS paths resolve relative to this script's directory,
     # so the script works regardless of which cwd it's invoked from (cron,
@@ -300,6 +316,7 @@ def main():
     parser.add_argument("--output-root", default=None, help="defaults to dataset_v2_<day>")
     parser.add_argument("--max-pairs", type=int, default=0, help="0 = all")
     parser.add_argument("--sample-stride", type=int, default=1)
+    parser.add_argument("--jobs", type=int, default=os.cpu_count(), help="Number of parallel jobs")
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -317,29 +334,29 @@ def main():
         idx = np.linspace(0, len(pairs) - 1, args.max_pairs, dtype=int)
         pairs = [pairs[i] for i in idx]
 
-    print(f"Found {len(pairs)} paired frames for {args.day}")
+    print(f"Found {len(pairs)} paired frames for {args.day} — processing with {args.jobs} jobs")
     t0 = time.time()
     ok = fail = 0
-    for i, fp in enumerate(pairs):
-        try:
-            result = process_frame(fp, config)
-            if result is None:
+
+    with ProcessPoolExecutor(max_workers=args.jobs) as executor:
+        futures = [executor.submit(worker, fp, config, out_root) for fp in pairs]
+
+        for i, future in enumerate(futures):
+            fid, success, err = future.result()
+            if success:
+                ok += 1
+            else:
                 fail += 1
-                continue
-            cv2.imwrite(str(out_root / "images" / f"{fp.frame_id}.jpg"), result["img"])
-            cv2.imwrite(str(out_root / "masks" / f"{fp.frame_id}.png"), result["mask"])
-            with open(out_root / "meta" / f"{fp.frame_id}.json", "w") as f:
-                json.dump(result["meta"], f, indent=2)
-            ok += 1
-        except Exception as e:
-            fail += 1
-            print(f"  [{fp.frame_id}] FAIL: {e}")
-        if (i + 1) % 25 == 0 or i + 1 == len(pairs):
-            elapsed = time.time() - t0
-            rate = (i + 1) / elapsed
-            eta = (len(pairs) - (i + 1)) / max(rate, 1e-6)
-            print(f"  {i + 1}/{len(pairs)}  ok={ok} fail={fail}  "
-                  f"{rate:.1f} fps  eta={eta:.0f}s")
+                if err != "Skipped":
+                    print(f"  [{fid}] FAIL: {err}")
+
+            if (i + 1) % 50 == 0 or i + 1 == len(pairs):
+                elapsed = time.time() - t0
+                rate = (i + 1) / elapsed
+                eta = (len(futures) - (i + 1)) / max(rate, 1e-6)
+                print(f"  {i + 1}/{len(futures)}  ok={ok} fail={fail}  "
+                      f"{rate:.1f} fps  eta={eta:.0f}s")
+
     dt = time.time() - t0
     print(f"Done: {ok} ok, {fail} fail in {dt:.1f}s ({ok / max(dt, 1e-6):.1f} fps)")
     print(f"Output: {out_root}")

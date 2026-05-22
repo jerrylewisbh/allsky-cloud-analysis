@@ -189,12 +189,12 @@ def main():
         emit_row(rows, frame_id, "ephemeris", "moon_alt_deg", moon_alt, "deg", ts, 0.0, 0)
         emit_row(rows, frame_id, "ephemeris", "moon_phase_pct", moon_phase, "pct", ts, 0.0, 0)
 
-        # ESP-side mpsas (nighttime SQM signal)
+        # ESP-side illuminance_lux (nighttime skyglow signal)
         esp = r["esp32_sensors"] or {}
-        mpsas = esp.get("sky_brightness_mpsas")
-        if mpsas is not None:
-            emit_row(rows, frame_id, "esp32_sensor", "sky_brightness_mpsas",
-                     float(mpsas), "mag_per_arcsec2", ts, 0.0, 0)
+        lux = esp.get("illuminance_lux")
+        if lux is not None:
+            emit_row(rows, frame_id, "esp32_sensor", "illuminance_lux",
+                     float(lux), "lux", ts, 0.0, 0)
             nighttime += 1
 
         # Firmware's own pessimistic cloud verdict + the numeric fractions it
