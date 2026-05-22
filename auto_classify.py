@@ -299,7 +299,16 @@ def classify(weak: dict[tuple, dict],
         confident_cloud = (n_scl == 0)
         # Fall through to family resolution
 
-    # 4. Truly mixed
+    # 3b. Strong local thermal overrides signal-split punt.
+    #     The thermal patch is the direct measurement of what's overhead.
+    #     If it shows ≥50% coverage but the cascade would otherwise punt
+    #     because of regional disagreement, trust the patch and let Rule 5's
+    #     local-only-cloud fallback infer low family + Rule 6 pick the genus.
+    elif thermal_mean_p is not None and thermal_mean_p > 0.5:
+        confident_cloud = False  # regional signals disagree, hence low conf
+        # Fall through to family resolution
+
+    # 4. Truly mixed (no strong cloud signal at all, OR thermal too weak to override)
     else:
         cl_src = [v[0] for v in strong_cloud] + [f"~{v[0]}" for v in weak_cloud]
         cr_src = [v[0] for v in strong_clear]
