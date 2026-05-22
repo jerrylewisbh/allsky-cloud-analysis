@@ -785,10 +785,10 @@ def main() -> None:
             index=0,
             help=(
                 "Narrow to frames where the auto-classifier predicted a specific "
-                "class. Pairs with the confidence filter — e.g. **class=clear + "
-                "confidence=high** validates the high-conf clear predictions. "
-                "**unknown** = the classifier punted (signal disagreement) — "
-                "these are the highest-value frames for active learning."
+                "class. **any** = any of the 9 taxonomy classes (excludes unknown). "
+                "**unknown** = classifier punted (signal disagreement). "
+                "Pairs with the confidence filter — e.g. **any + low** is your "
+                "active-learning queue for low-confidence taxonomy predictions."
             ),
         )
         regime_filter = st.multiselect(
@@ -946,7 +946,12 @@ def main() -> None:
         wanted_confidences = frozenset({"medium", "low"})
 
     wanted_classes: frozenset[str] | None = None
-    if class_filter != "any":
+    if class_filter == "any":
+        # "any" = any of the 9 taxonomy classes; excludes "unknown" so the
+        # active-learning queue (e.g. "any class + confidence=low") doesn't
+        # get polluted by classifier punts. Pick "unknown" explicitly to see those.
+        wanted_classes = frozenset(CLASSES)
+    else:
         wanted_classes = frozenset({class_filter})
 
     wanted_regimes: frozenset[str] | None = frozenset(regime_filter) if regime_filter else None
