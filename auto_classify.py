@@ -375,6 +375,15 @@ def classify(weak: dict[tuple, dict],
         elif goes_height < 2000:
             family = "low"
             family_reason = f"GOES height {goes_height:.0f}m → {family}"
+        elif goes_height < 7000 and goes_phase == "ice":
+            # Phase-aware override for borderline 5-7 km: pure ice at this
+            # height is much more often Cc/Cs (cirriform just below the 7 km
+            # cutoff) than Ac (which is water/mixed phase at mid-latitudes).
+            family = "high"
+            family_reason = (
+                f"GOES height {goes_height:.0f}m + ice phase → {family} "
+                "(cirriform despite mid-range height)"
+            )
         elif goes_height < 7000:
             family = "mid"
             family_reason = f"GOES height {goes_height:.0f}m → {family}"
