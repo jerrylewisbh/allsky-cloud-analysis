@@ -258,16 +258,22 @@ def classify(weak: dict[tuple, dict],
         # Brightness OR texture alone is unreliable — moonlight inflates v_mean,
         # and warm sensor noise inflates v_std. Require both for a cloud vote.
         #
-        # The strong-CLEAR branch additionally requires a light source: at deep
-        # night with no moon, the patch is dark whether it's clear OR thinly
-        # cloudy (cirrus with stars showing through), so "dark = clear" is an
-        # invalid inference. Without illumination, demote to weak.
+        # The strong-CLEAR branch requires a light source (moon up + >10% phase
+        # OR nautical twilight): at deep night with no moon, the patch is dark
+        # whether it's clear OR thinly cloudy, so "dark = clear" is invalid.
+        #
+        # The strong-CLOUD branch requires sun to be well below horizon
+        # (sun_alt < -6°): during civil twilight, sky brightening from
+        # approaching/receding sun produces high v_mean + v_std identical to
+        # cloud-reflected light. Without this guard, sunrise/sunset frames
+        # false-positive as cloud and block the thermal_veto.
         light_available = (
-            (sun_alt is not None and sun_alt > -12.0)  # nautical twilight or shallower
+            (sun_alt is not None and sun_alt > -12.0)
             or (moon_alt is not None and moon_alt > 0 and
                 moon_phase is not None and moon_phase > 10)
         )
-        if rgb_v_std > 15.0 and rgb_v_mean > 80:
+        sun_safely_down = sun_alt is not None and sun_alt < -6.0
+        if rgb_v_std > 15.0 and rgb_v_mean > 80 and sun_safely_down:
             v = True
         elif rgb_v_mean < 50 and rgb_v_std < 5.0 and light_available:
             v = False
