@@ -746,6 +746,7 @@ def compute_rain_sessions(
     # within the same physical storm get separate sessions only if rain
     # truly drops to zero between them (rare for sustained storms).
     THRESHOLD = 0.01
+    BUFFER_MINS = 5  # Stop N mins before onset to ensure lens is truly dry
     onset_times = [
         records[i][0]
         for i in range(1, len(records))
@@ -756,30 +757,48 @@ def compute_rain_sessions(
 
     record_times = [r[0] for r in records]
     window = dt.timedelta(minutes=window_minutes)
+    buffer = dt.timedelta(minutes=BUFFER_MINS)
     sessions: list[tuple[str, frozenset[str]]] = []
     for onset in onset_times:
         lo = bisect.bisect_left(record_times, onset - window)
-        hi = bisect.bisect_left(record_times, onset)
+        hi = bisect.bisect_left(record_times, onset - buffer)
         session_frames: set[str] = set()
+        
+        # Continuity: if GOES drops out for a few frames, assume the cloud 
+        # is still there if it was just there. Reset for each session.
+        last_valid_goes_passed = False
+        
         for idx in range(lo, hi):
             fid = records[idx][1]
             wf = weak.get(fid, {})
 
             goes_present = wf.get(("goes19_acmc", "cloud_present"))
-            if goes_present is None or str(goes_present.get("value")) != "1":
-                continue
-            goes_phase = wf.get(("goes19_actpc", "cloud_top_phase"))
-            if goes_phase is None or goes_phase.get("value") not in ("ice", "mixed"):
-                continue
-            goes_height = wf.get(("goes19_achac", "cloud_top_height_m"))
-            if goes_height is None:
-                continue
-            try:
-                if float(goes_height["value"]) < 5000:
-                    continue
-            except (ValueError, TypeError):
-                continue
-            session_frames.add(fid)
+            goes_phase = wf.get(("goes19_actpc", "cloud_top_phase"), {}).get("value")
+            goes_height_raw = wf.get(("goes19_achac", "cloud_top_height_m"))
+
+            if goes_present is not None:
+                # If we have GOES data, evaluate it strictly
+                is_cloudy = str(goes_present.get("value")) == "1"
+                
+                height = -1.0
+                try:
+                    if goes_height_raw:
+                        height = float(goes_height_raw["value"])
+                except (ValueError, TypeError):
+                    pass
+
+                # Expanded criteria: 5km+ ice/mixed (Cb), or 3km+ mixed/supercooled (Ns)
+                passed = is_cloudy and (
+                    (height >= 5000 and goes_phase in ("ice", "mixed")) or
+                    (height >= 3000 and goes_phase in ("mixed", "supercooled_water"))
+                )
+                last_valid_goes_passed = passed
+            else:
+                # GOES dropout: stick with the last known state
+                pass
+
+            if last_valid_goes_passed:
+                session_frames.add(fid)
 
         if session_frames:
             label = onset.strftime("%Y-%m-%d %H:%M UTC")
