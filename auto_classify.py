@@ -133,11 +133,19 @@ def classify(weak: dict[tuple, dict],
             and thermal_mean_p is not None and thermal_mean_p < 0.70):
         texture_note = f"thermal std={thermal_std:.2f} mean={thermal_mean_p:.2f}"
         if is_day:
+            # METAR is authoritative when present
             if metar_okta is not None and metar_okta >= 5:
                 return "sc", "medium", \
                        f"daytime broken-cloud texture ({texture_note}) + METAR {metar_okta}/8 → broken Sc"
+            # METAR missing or scattered: thermal_mean_p disambiguates cu vs sc.
+            # Cu = discrete cells with blue gaps → low mean (most pixels are clear sky).
+            # Sc = continuous lumpy deck → mid-to-high mean (most pixels are cloud,
+            #      the texture is thickness variation not gaps).
+            if thermal_mean_p >= 0.30:
+                return "sc", "medium", \
+                       f"daytime textured deck ({texture_note}) — mean≥0.30 → Sc (deck with thickness variation, not Cu gaps)"
             return "cu", "medium", \
-                   f"daytime broken-cloud texture ({texture_note}) → Cu over blue gaps"
+                   f"daytime broken-cloud texture ({texture_note}) — low mean → Cu over blue gaps"
         if is_night:
             return "ac_as", "medium", \
                    f"night broken-cloud texture ({texture_note}) → Ac/broken Sc"
