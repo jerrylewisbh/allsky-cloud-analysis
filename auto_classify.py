@@ -335,14 +335,26 @@ def classify(weak: dict[tuple, dict],
     if veto_path or majority_path:
         rgb_suspicious = rgb_nrbr_p95 is not None and rgb_nrbr_p95 > -0.15
         metar_overcast = metar_okta is not None and metar_okta >= 6
-        if not rgb_suspicious and not metar_overcast:
+        # FOV-mismatch handling: METAR is regional (airport ~10 km away),
+        # the thermal patch is a direct local measurement. When thermal_veto
+        # fires (mean<0.02, std<0.05 — patch is unambiguously clear), only
+        # RGB (also local) can block — METAR disagreement is interpreted as
+        # FOV mismatch, not as evidence against clear. For majority_path
+        # (multiple weaker local clears), METAR still blocks since the
+        # local evidence is less rock-solid.
+        if veto_path:
+            block = rgb_suspicious
+        else:
+            block = rgb_suspicious or metar_overcast
+        if not block:
             sig = ", ".join(v[2] for v in strong_clear if v[3]) or f"thermal_p={thermal_mean_p:.2f}"
             if rgb_nrbr_p95 is not None and rgb_nrbr_p95 > -0.35:
                 return "clear", "low", \
                        f"local says clear ({sig}); RGB nrbr_p95={rgb_nrbr_p95:+.2f} hints at cloud — verify"
+            fov_note = " (METAR overcast = FOV mismatch from airport)" if metar_overcast else ""
             return "clear", "medium", \
-                   f"local says clear ({sig}); regional/weak signals disagree"
-        # else: fall through to cloud-evidence resolution — RGB or METAR contradicts.
+                   f"local says clear ({sig}); regional/weak signals disagree{fov_note}"
+        # else: fall through to cloud-evidence resolution — local RGB contradicts thermal.
 
     # 3. Cloud evidence dominates
     if n_sc >= 2 or (n_sc >= 1 and n_w >= 2):
