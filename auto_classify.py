@@ -130,7 +130,7 @@ def classify(weak: dict[tuple, dict],
     high_family_from_goes = (goes_height is not None and goes_height >= 7000)
     if (not high_family_from_goes
             and thermal_std is not None and thermal_std > 0.07
-            and thermal_mean_p is not None and thermal_mean_p < 0.70):
+            and thermal_mean_p is not None and thermal_mean_p < 0.90):  # was < 0.70
         texture_note = f"thermal std={thermal_std:.2f} mean={thermal_mean_p:.2f}"
         if is_day:
             # METAR is authoritative when present
@@ -141,9 +141,9 @@ def classify(weak: dict[tuple, dict],
             # Cu = discrete cells with blue gaps → low mean (most pixels are clear sky).
             # Sc = continuous lumpy deck → mid-to-high mean (most pixels are cloud,
             #      the texture is thickness variation not gaps).
-            if thermal_mean_p >= 0.30:
+            if thermal_mean_p >= 0.55:  # was >= 0.30 (recalibrated for new sigmoid)
                 return "sc", "medium", \
-                       f"daytime textured deck ({texture_note}) — mean≥0.30 → Sc (deck with thickness variation, not Cu gaps)"
+                       f"daytime textured deck ({texture_note}) — mean≥0.55 → Sc (deck with thickness variation, not Cu gaps)"
             return "cu", "medium", \
                    f"daytime broken-cloud texture ({texture_note}) — low mean → Cu over blue gaps"
         if is_night:
@@ -152,7 +152,7 @@ def classify(weak: dict[tuple, dict],
 
     # ---- Rule 0.5: Visual Puff detector (daytime only) ----
     if is_day and rgb_nrbr_p95 is not None and rgb_nrbr_p95 > 0.0:
-        if thermal_mean_p is not None and thermal_mean_p < 0.30:
+        if thermal_mean_p is not None and thermal_mean_p < 0.55:  # was < 0.30 (recalibrated)
             return "cu", "low", f"visually stark white peak (nrbr_p95={rgb_nrbr_p95:+.2f}) → likely sparse Cu"
 
     # ---- Rule 1: active precipitation suggests ns_cb ----
@@ -177,7 +177,7 @@ def classify(weak: dict[tuple, dict],
             and goes_height is not None and goes_height > 7000
             and goes_mask == 1
             and metar_okta is not None and metar_okta <= 3
-            and thermal_mean_p is not None and thermal_mean_p < 0.15):
+            and thermal_mean_p is not None and thermal_mean_p < 0.45):  # was < 0.15 (recalibrated)
         return "ci", "medium", \
                (f"GOES high-ice cloud (top {goes_height:.0f}m, mask=1) + "
                 f"METAR {metar_okta}/8 + thermal_p={thermal_mean_p:.2f} → thin Ci")
@@ -186,11 +186,15 @@ def classify(weak: dict[tuple, dict],
     votes: list[tuple[str, bool | None, str, bool]] = []
 
     if thermal_mean_p is not None:
-        if thermal_mean_p > 0.4:
+        # NOTE: thresholds recalibrated 2026-05-24 for post-sigmoid-change baseline.
+        # After make_masks_v2.py commits 0c4ab78 + 02dd09e (ABS_THRESHOLD_C, sigma
+        # changes), clear-sky thermal_mean_p reads ~0.25-0.35 instead of the old
+        # ~0.005-0.02 baseline. Old values commented for easy revert if mask is fixed.
+        if thermal_mean_p > 0.65:          # was > 0.40
             v = True
-        elif thermal_mean_p > 0.2:
+        elif thermal_mean_p > 0.50:        # was > 0.20
             v = None
-        elif thermal_mean_p < 0.05:
+        elif thermal_mean_p < 0.35:        # was < 0.05
             v = False
         elif metar_okta is not None and metar_okta >= 5:
             v = None
@@ -305,7 +309,7 @@ def classify(weak: dict[tuple, dict],
     #    Between -0.35 and -0.15, the frame is "RGB-suspicious" — still return
     #    clear, but at low confidence. Below -0.35 → medium confidence.
     thermal_veto = (
-        thermal_mean_p is not None and thermal_mean_p < 0.02
+        thermal_mean_p is not None and thermal_mean_p < 0.30  # was < 0.02 (recalibrated)
         and (thermal_std is None or thermal_std < 0.05)
     )
     veto_path = thermal_veto and local_sc == 0
@@ -332,7 +336,7 @@ def classify(weak: dict[tuple, dict],
     #     If it shows ≥50% coverage but the cascade would otherwise punt
     #     because of regional disagreement, trust the patch and let Rule 5's
     #     local-only-cloud fallback infer low family + Rule 6 pick the genus.
-    elif thermal_mean_p is not None and thermal_mean_p > 0.5:
+    elif thermal_mean_p is not None and thermal_mean_p > 0.75:  # was > 0.5 (recalibrated)
         confident_cloud = False  # regional signals disagree, hence low conf
         # Fall through to family resolution
 
@@ -374,10 +378,10 @@ def classify(weak: dict[tuple, dict],
     family = None
     family_reason = ""
     if goes_height is not None and goes_height > 0:
-        if thermal_mean_p is not None and thermal_mean_p > 0.60:
+        if thermal_mean_p is not None and thermal_mean_p > 0.85:  # was > 0.60 (recalibrated)
             family = "low"
             family_reason = f"GOES height {goes_height:.0f}m but high opacity suggests {family}"
-        elif thermal_mean_p is not None and thermal_mean_p > 0.40 and goes_height > 2000:
+        elif thermal_mean_p is not None and thermal_mean_p > 0.65 and goes_height > 2000:  # was > 0.40
             family = "mid"
             family_reason = f"GOES height {goes_height:.0f}m but moderate opacity suggests {family}"
         elif goes_height < 2000:
@@ -409,7 +413,7 @@ def classify(weak: dict[tuple, dict],
         # cloud — GOES and airport observers reliably see mid/high cloud at
         # this scale, so localized cu/sc is the only thing that fits.
         # Rule 6 then routes cu vs sc via thermal_std / METAR genus.
-        if thermal_mean_p is not None and thermal_mean_p > 0.4:
+        if thermal_mean_p is not None and thermal_mean_p > 0.65:  # was > 0.4 (recalibrated)
             family = "low"
             family_reason = (
                 f"local-only cloud (thermal_p={thermal_mean_p:.2f}, "
@@ -432,9 +436,9 @@ def classify(weak: dict[tuple, dict],
         # isolated mare's-tails cirrus. Rules can't distinguish these without
         # RGB texture; flipping the default minimizes systematic mislabeling
         # of Cc/Cs as Ci. Labeler overrides to `ci` when fibrous streaks visible.
-        if is_night and (thermal_mean_p is None or thermal_mean_p < 0.3):
+        if is_night and (thermal_mean_p is None or thermal_mean_p < 0.55):  # was < 0.3 (recalibrated)
             return "cs_cc", "medium", "; ".join(
-                reasoning_bits + ["nighttime high cloud, thermal_p<0.3 → thin Cc/Cs (override to ci if fibrous)"])
+                reasoning_bits + ["nighttime high cloud, thermal_p<0.55 → thin Cc/Cs (override to ci if fibrous)"])
         return "cs_cc", "low", "; ".join(reasoning_bits + ["Ci/Cs/Cc need RGB texture"])
 
     if family == "mid":
@@ -451,7 +455,7 @@ def classify(weak: dict[tuple, dict],
         # patch (mean > 0.50) is a deck (Sc), even if CSI fluctuates. The CSI
         # std → Cu inference only holds when the patch shows gaps (mean < 0.50);
         # otherwise the variability is thickness changes in a continuous deck.
-        if thermal_mean_p is not None and thermal_mean_p > 0.50:
+        if thermal_mean_p is not None and thermal_mean_p > 0.75:  # was > 0.50 (recalibrated)
             return "sc", "medium", "; ".join(reasoning_bits + [
                 f"low opaque deck (thermal_p={thermal_mean_p:.2f}) → Sc"])
         if is_day and csi_std is not None and csi_std > 0.10:
