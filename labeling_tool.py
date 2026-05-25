@@ -729,7 +729,7 @@ def render_cleanup_panel(pair: dict, current_mean_p: float, colormap_name: str) 
             "✓ Save cleaned mask",
             key=f"cleanup_save_{pair['frame_id']}",
             type="primary",
-            help="Backs up the original to <frame>.png.original, overwrites the "
+            help="Backs up the original to <frame>.original.png, overwrites the "
                  "mask, re-runs auto_classify on this frame.",
         )
         cancel_clicked = action_cols[1].button(
@@ -746,7 +746,9 @@ def render_cleanup_panel(pair: dict, current_mean_p: float, colormap_name: str) 
                 st.error("Set a Labeler ID in the sidebar before saving cleanup.")
                 return
             mask_path = pair["mask_path"]
-            backup_path = mask_path + ".original"
+            # cv2.imwrite infers format from the extension, so the backup
+            # must end in .png — use <stem>.original.png, not <stem>.png.original.
+            backup_path = str(Path(mask_path).with_suffix(".original.png"))
             # Backup only on first cleanup — keep the truly pristine version.
             if not Path(backup_path).exists():
                 cv2.imwrite(backup_path, raw_mask)
