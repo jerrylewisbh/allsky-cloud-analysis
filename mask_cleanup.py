@@ -24,8 +24,8 @@ import csv
 import datetime as dt
 from pathlib import Path
 
+import cv2
 import numpy as np
-from scipy.ndimage import median_filter
 
 NO_DATA_VALUE = 255
 PROJECT_ROOT = Path(__file__).parent.resolve()
@@ -68,8 +68,10 @@ def clean_anomalous_pixels(
     # Fill no-data cells with the global valid median so the local-median
     # filter doesn't pull values toward zero near the patch edge.
     fill = float(np.median(p[valid]))
-    p_filled = np.where(valid, p, fill)
-    local_median = median_filter(p_filled, size=neighborhood)
+    p_filled = np.where(valid, p, fill).astype(np.float32)
+    # cv2.medianBlur on float32 only accepts ksize 3 or 5 — clamp.
+    ksize = neighborhood if neighborhood in (3, 5) else 5
+    local_median = cv2.medianBlur(p_filled, ksize)
 
     # Outlier: pixel value exceeds its local neighborhood by `threshold`.
     # Only consider currently-valid pixels (no-data stays no-data).
