@@ -21,6 +21,8 @@ import streamlit as st
 from PIL import Image
 
 from auto_classify import classify as auto_classify
+from auto_classify_batch import reclassify_frame
+from mask_cleanup import clean_anomalous_pixels, log_cleanup
 
 CLASSES = ["clear", "ci", "cs_cc", "ac_as", "cu", "sc", "st", "ns_cb", "multi"]
 CLASS_DESCRIPTIONS = {
@@ -500,6 +502,138 @@ def render_decision_tree(frame_id: str, regime: str,
             st.warning(w)
 
     return suggestion
+
+
+def render_cleanup_panel(pair: dict, current_mean_p: float, colormap_name: str) -> None:
+    """Per-frame sensor-contamination cleanup. Lets the labeler preview a
+    median-filter outlier removal, then save the cleaned mask (with backup)
+    and trigger a re-classification of just this frame.
+
+    Hidden by default — only worth opening when a frame's heatmap shows
+    isolated bright specks that don't look like real cloud.
+    """
+    with st.expander("Mask cleanup (remove sensor contamination)", expanded=False):
+        st.caption(
+            "Pixels much brighter than their local 5×5 neighborhood are likely "
+            "sensor contamination (warm dust, lens residue), not real cloud. "
+            "Real cloud has spatial coherence — neighbouring pixels also bright."
+        )
+        threshold = st.slider(
+            "Outlier threshold (probability units above local median)",
+            min_value=0.10, max_value=0.60, value=0.30, step=0.05,
+            key=f"cleanup_thr_{pair['frame_id']}",
+            help="Higher = only mask obvious outliers (spares cloud edges). "
+                 "Lower = aggressive (may clip real broken cloud).",
+        )
+        preview_clicked = st.button("Preview cleanup", key=f"cleanup_prev_{pair['frame_id']}")
+        state_key = f"cleanup_pending_{pair['frame_id']}"
+        if preview_clicked:
+            raw_mask = np.array(Image.open(pair["mask_path"]).convert("L"))
+            cleaned, n_marked = clean_anomalous_pixels(raw_mask, threshold=threshold)
+            st.session_state[state_key] = {
+                "cleaned": cleaned,
+                "raw": raw_mask,
+                "n_marked": n_marked,
+                "threshold": threshold,
+            }
+
+        pending = st.session_state.get(state_key)
+        if pending is None:
+            return
+
+        cleaned = pending["cleaned"]
+        raw_mask = pending["raw"]
+        n_marked = pending["n_marked"]
+        n_valid_before = int((raw_mask != NO_DATA_VALUE).sum())
+
+        # Side-by-side heatmaps + new thermal_mean_p
+        col_b, col_a = st.columns(2)
+        with col_b:
+            st.caption(f"Before — thermal_mean_p = {current_mean_p:.3f}")
+            st.image(colorize_mask(pair["mask_path"], colormap=colormap_name),
+                     use_container_width=True)
+        valid_after = cleaned != NO_DATA_VALUE
+        if valid_after.any():
+            new_mean = float((cleaned[valid_after].astype(np.float32) / 254.0).mean())
+            new_mean_str = f"{new_mean:.3f}"
+        else:
+            new_mean_str = "n/a (no valid pixels left)"
+        with col_a:
+            st.caption(f"After — thermal_mean_p = {new_mean_str}  ·  {n_marked} px masked")
+            # colorize_mask reads from disk, so we render the cleaned array directly
+            st.image(_colorize_array(cleaned, colormap_name),
+                     use_container_width=True)
+
+        if n_marked == 0:
+            st.info("No pixels exceeded the threshold — no cleanup needed at this setting.")
+            return
+
+        action_cols = st.columns([1, 1, 2])
+        save_clicked = action_cols[0].button(
+            "✓ Save cleaned mask",
+            key=f"cleanup_save_{pair['frame_id']}",
+            type="primary",
+            help="Backs up the original to <frame>.png.original, overwrites the "
+                 "mask, re-runs auto_classify on this frame.",
+        )
+        cancel_clicked = action_cols[1].button(
+            "Cancel", key=f"cleanup_cancel_{pair['frame_id']}",
+        )
+
+        if cancel_clicked:
+            del st.session_state[state_key]
+            st.rerun()
+
+        if save_clicked:
+            labeler_id = st.session_state.get("labeler_id", "").strip()
+            if not labeler_id:
+                st.error("Set a Labeler ID in the sidebar before saving cleanup.")
+                return
+            mask_path = pair["mask_path"]
+            backup_path = mask_path + ".original"
+            # Backup only on first cleanup — keep the truly pristine version.
+            if not Path(backup_path).exists():
+                cv2.imwrite(backup_path, raw_mask)
+            cv2.imwrite(mask_path, cleaned)
+            log_cleanup(pair["frame_id"], pending["threshold"], n_marked,
+                        n_valid_before, labeler_id)
+            new_row = reclassify_frame(
+                pair["frame_id"], mask_path, pair["rgb_path"],
+                meta_path=_guess_meta_path(mask_path),
+            )
+            # Clear caches so the next render reads the new mask + auto_label.
+            thermal_cloud_stats.clear() if hasattr(thermal_cloud_stats, "clear") else None
+            try:
+                st.cache_data.clear()
+            except Exception:
+                pass
+            del st.session_state[state_key]
+            verdict = (f" → auto-label now **{new_row['auto_class']}** "
+                       f"({new_row['auto_confidence']})") if new_row else ""
+            st.toast(f"Cleaned {pair['frame_id']}: {n_marked} px masked{verdict}",
+                     icon="🧹")
+            st.rerun()
+
+
+def _colorize_array(raw: np.ndarray, colormap: str) -> np.ndarray:
+    """Same as colorize_mask but takes an in-memory array (not a path).
+    Lets the cleanup preview render the cleaned mask without touching disk."""
+    valid = raw != NO_DATA_VALUE
+    probs_u8 = np.where(valid, raw, 0).astype(np.uint8)
+    lut = COLORMAPS.get(colormap, SKY_CLOUD_LUT)
+    colored = lut[probs_u8]
+    yy, xx = np.indices(raw.shape)
+    stripe = ((yy + xx) // 6) % 2 == 0
+    colored[(~valid) & stripe] = (60, 60, 60)
+    colored[(~valid) & ~stripe] = (100, 100, 100)
+    return colored
+
+
+def _guess_meta_path(mask_path: str) -> str | None:
+    """Derive the sidecar meta JSON path from a mask path."""
+    p = Path(mask_path)
+    meta = p.parent.parent / "meta" / f"{p.stem}.json"
+    return str(meta) if meta.exists() else None
 
 
 def colorize_mask(mask_path: str, colormap: str = "sky_cloud (custom)") -> np.ndarray:
@@ -1302,6 +1436,8 @@ def main() -> None:
             caption=f"Cloud probability heatmap ({colormap_name}) — grey diagonal stripe = no-data",
             use_container_width=True,
         )
+
+    render_cleanup_panel(pair, mean_p, colormap_name)
 
     existing_row = labels_df[labels_df["frame_id"] == pair["frame_id"]]
     has_existing = len(existing_row) > 0

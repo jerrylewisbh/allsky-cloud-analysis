@@ -140,6 +140,67 @@ def load_hand_labels() -> dict[str, dict]:
         return {r["frame_id"]: r for r in csv.DictReader(f)}
 
 
+def reclassify_frame(frame_id: str, mask_path: str, rgb_path: str,
+                     meta_path: str | None = None) -> dict | None:
+    """Recompute the auto-label row for a single frame and update auto_labels.csv
+    in place. Returns the new row dict, or None if AUTO_LABELS_CSV doesn't
+    exist yet.
+
+    Used by the labeling UI's mask-cleanup panel: after a labeler saves a
+    cleaned mask, this is called so the next visit to the frame sees the
+    corrected verdict.
+    """
+    if not AUTO_LABELS_CSV.exists():
+        return None
+
+    weak = load_weak_labels()
+    mp, mstd = thermal_stats(Path(mask_path))
+    nrbr_p95 = rgb_nrbr_p95_in_valid_region(Path(rgb_path), Path(mask_path))
+    v_mean, v_std = rgb_v_stats_in_valid_region(Path(rgb_path), Path(mask_path))
+    align_mi = read_alignment_mi(Path(meta_path)) if meta_path else None
+    wf = weak.get(frame_id, {})
+    cls, conf, reasoning = classify(
+        wf, thermal_mean_p=mp,
+        rgb_nrbr_p95=nrbr_p95,
+        rgb_v_mean=v_mean,
+        rgb_v_std=v_std,
+        thermal_std=mstd,
+    )
+    new_row = {
+        "frame_id": frame_id,
+        "auto_class": cls,
+        "auto_confidence": conf,
+        "auto_reasoning": reasoning,
+        "thermal_mean_p": f"{mp:.3f}" if mp is not None else "",
+        "thermal_std": f"{mstd:.3f}" if mstd is not None else "",
+        "rgb_nrbr_p95": f"{nrbr_p95:+.3f}" if nrbr_p95 is not None else "",
+        "rgb_v_mean": f"{v_mean:.1f}" if v_mean is not None else "",
+        "rgb_v_std": f"{v_std:.1f}" if v_std is not None else "",
+        "alignment_mi": f"{align_mi:.3f}" if align_mi is not None else "",
+        "computed_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+    }
+
+    # Read full CSV, replace (or append) the target row, write back.
+    # Safe even if the file is large — auto_labels.csv is <100k rows.
+    with open(AUTO_LABELS_CSV, newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames or list(new_row.keys())
+        rows = list(reader)
+    found = False
+    for i, r in enumerate(rows):
+        if r["frame_id"] == frame_id:
+            rows[i] = {k: new_row.get(k, "") for k in fieldnames}
+            found = True
+            break
+    if not found:
+        rows.append({k: new_row.get(k, "") for k in fieldnames})
+    with open(AUTO_LABELS_CSV, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        w.writerows(rows)
+    return new_row
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--datasets", default="dataset_v2_*")
