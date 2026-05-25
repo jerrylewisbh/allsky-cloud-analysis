@@ -11,8 +11,13 @@ PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 PROJECT_DIR_ROOT=/home/YOURUSER/allsky-cloud-analysis
 LOG_DIR=/var/log/allsky-cloud-analysis
 
-# Daily 04:00 local — generate masks for yesterday's captures
+# Daily 04:00 local — generate masks for yesterday's captures.
+# Uses --skip-existing by default — safe to re-run without wasting work.
 0 4 * * * $PROJECT_DIR_ROOT/deploy/cron/daily-mask-gen.sh >> $LOG_DIR/daily-mask-gen.log 2>&1
+
+# Weekly Sun 06:00 — backfill any missed days (catches days where the
+# daily cron failed or didn't run). Idempotent via --skip-existing.
+0 6 * * 0 $PROJECT_DIR_ROOT/deploy/cron/backfill-missing-days.sh >> $LOG_DIR/backfill-missing-days.log 2>&1
 
 # Daily 02:00 — METAR (both stations)
 0 2 * * * $PROJECT_DIR_ROOT/deploy/cron/daily-metar.sh >> $LOG_DIR/daily-metar.log 2>&1
