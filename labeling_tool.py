@@ -169,9 +169,11 @@ COLORMAPS: dict[str, np.ndarray] = {
 
 
 @st.cache_data(show_spinner=False)
-def index_full_allsky(date_yyyymmdd: str, allsky_root: str) -> dict[str, str]:
+def index_full_allsky(date_yyyymmdd: str, allsky_root: str,
+                      dir_mtime: float) -> dict[str, str]:
     """Build {frame_id: absolute_path} for the full-fisheye captures of one day.
-    Cached per-day so the NAS walk happens once."""
+    Cached per-day; `dir_mtime` participates in the cache key so the index
+    auto-invalidates when new files land on the NAS."""
     root = Path(allsky_root) / "images" / date_yyyymmdd
     if not root.is_dir():
         return {}
@@ -188,8 +190,18 @@ def find_full_allsky_path(frame_id: str) -> str | None:
         return None
     day = m.group(1)
     prev_day = (dt.datetime.strptime(day, "%Y%m%d") - dt.timedelta(days=1)).strftime("%Y%m%d")
+    today = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d")
     for d in (day, prev_day):
-        idx = index_full_allsky(d, str(ALLSKY_ROOT))
+        # Cache key: combine date with a freshness signal. For old days, use
+        # the day-dir mtime (stable). For today/yesterday, use a per-minute
+        # bucket so cache invalidates every minute as new captures land.
+        day_root = ALLSKY_ROOT / "images" / d
+        if d in (today, prev_day) and d == today:
+            # Live-ingest day: cache for ~1 minute then refresh
+            freshness = int(dt.datetime.now(dt.timezone.utc).timestamp() / 60)
+        else:
+            freshness = day_root.stat().st_mtime if day_root.is_dir() else 0.0
+        idx = index_full_allsky(d, str(ALLSKY_ROOT), freshness)
         if frame_id in idx:
             return idx[frame_id]
     return None
