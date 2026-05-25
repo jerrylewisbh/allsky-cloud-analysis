@@ -334,8 +334,11 @@ def classify(weak: dict[tuple, dict],
     #    pixels brighter than typical clear sky — fall through so cu/sc fire.
     #    Between -0.35 and -0.15, the frame is "RGB-suspicious" — still return
     #    clear, but at low confidence. Below -0.35 → medium confidence.
+    # Threshold 0.05 (was 0.02): accommodates ~0.02-0.03 baseline bias from
+    # residual sensor-edge contamination that survives manual cleaning. True
+    # clouds read >0.20 mean so the wider veto can't false-trigger on cloud.
     thermal_veto = (
-        thermal_mean_p is not None and thermal_mean_p < 0.02
+        thermal_mean_p is not None and thermal_mean_p < 0.05
         and (thermal_std is None or thermal_std < 0.05)
     )
     veto_path = thermal_veto and local_sc == 0
