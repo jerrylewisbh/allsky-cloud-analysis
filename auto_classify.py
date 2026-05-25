@@ -141,9 +141,9 @@ def classify(weak: dict[tuple, dict],
             # Cu = discrete cells with blue gaps → low mean (most pixels are clear sky).
             # Sc = continuous lumpy deck → mid-to-high mean (most pixels are cloud,
             #      the texture is thickness variation not gaps).
-            if thermal_mean_p >= 0.30:
+            if thermal_mean_p >= 0.22:
                 return "sc", "medium", \
-                       f"daytime textured deck ({texture_note}) — mean≥0.30 → Sc (deck with thickness variation, not Cu gaps)"
+                       f"daytime textured deck ({texture_note}) — mean≥0.22 → Sc (deck with thickness variation, not Cu gaps)"
             return "cu", "medium", \
                    f"daytime broken-cloud texture ({texture_note}) — low mean → Cu over blue gaps"
         if is_night:
@@ -172,15 +172,23 @@ def classify(weak: dict[tuple, dict],
         return "ns_cb", "medium", \
                f"rain_1h_mm={rain_mm:.2f} > 0.1 (visual genus may differ — verify)"
 
-    # ---- Rule 2: targeted high-ice Ci (locals can't see thin cirrus) ----
+    # ---- Rule 2: targeted high-ice cs_cc (locals can't see thin cirrus) ----
+    # GOES high-altitude ice phase is the most reliable cirriform indicator
+    # we have. When that fires AND the local thermal patch reads near-clear
+    # (the thin cirrus is below the thermal sensitivity floor — happens to
+    # ~13/81 of hand-labeled cs_cc frames), trust GOES. Returns cs_cc rather
+    # than ci because Cs/Cc are more common than isolated mare's-tails Ci at
+    # our latitude (Calgary). Labeler overrides to ci when fibrous visible.
+    # Note: METAR requirement dropped — most twilight/night frames have no
+    # METAR update within the window, blocking the rule from firing on the
+    # very frames it's designed to catch.
     if (goes_phase == "ice"
             and goes_height is not None and goes_height > 7000
             and goes_mask == 1
-            and metar_okta is not None and metar_okta <= 3
-            and thermal_mean_p is not None and thermal_mean_p < 0.15):
-        return "ci", "medium", \
+            and thermal_mean_p is not None and thermal_mean_p < 0.20):
+        return "cs_cc", "medium", \
                (f"GOES high-ice cloud (top {goes_height:.0f}m, mask=1) + "
-                f"METAR {metar_okta}/8 + thermal_p={thermal_mean_p:.2f} → thin Ci")
+                f"thermal_p={thermal_mean_p:.2f} → thin Cs/Cc")
 
     # ---- Rule 3: cloud-presence vote with three-tier semantics ----
     votes: list[tuple[str, bool | None, str, bool]] = []
