@@ -259,22 +259,40 @@ def apply_fallbacks(transforms: dict[str, dict], static_config: dict) -> dict[st
     return out
 
 
-def load_static_config() -> dict:
-    """Load the static calibration from the cron script's config (or env).
-    The values must match those passed to make_masks_v2.py by the cron."""
-    # These default values mirror what the firmware + matched_crop calibration
-    # produced. Override via environment if needed.
-    import os
-    return {
-        "fov": float(os.environ.get("CFG_FOV", 60.0)),
-        "rot": float(os.environ.get("CFG_ROT", 0.0)),
-        "x_off": float(os.environ.get("CFG_X_OFF", 0.0)),
-        "y_off": float(os.environ.get("CFG_Y_OFF", 0.0)),
-        "dist": float(os.environ.get("CFG_DIST", 0.0)),
-        "proj_on": int(os.environ.get("CFG_PROJ_ON", 1)),
-        "flip_h": int(os.environ.get("CFG_FLIP_H", 0)),
-        "flip_v": int(os.environ.get("CFG_FLIP_V", 1)),
-    }
+def load_static_config(config_path: Path | None = None) -> dict:
+    """Load the static calibration from alignment_config.json — the SAME file
+    mask-gen reads. Must match the calibration used to project the masks we're
+    optimizing relative to, otherwise the optimizer starts from a wrong baseline
+    and may not find the local optimum within its bounds.
+
+    Path resolution:
+      1. --config CLI arg if provided
+      2. PROJECT_ROOT / 'alignment_config.json'
+      3. fall back to firmware defaults (likely wrong)
+    """
+    candidates = []
+    if config_path:
+        candidates.append(Path(config_path))
+    candidates.append(PROJECT_ROOT / "alignment_config.json")
+    for p in candidates:
+        if p.exists():
+            with open(p) as f:
+                cfg = json.load(f)
+            print(f"Loaded static config from {p}: {cfg}")
+            # Fill any missing keys with safe defaults
+            cfg.setdefault("fov", 60.0)
+            cfg.setdefault("rot", 0.0)
+            cfg.setdefault("x_off", 0.0)
+            cfg.setdefault("y_off", 0.0)
+            cfg.setdefault("dist", 0.0)
+            cfg.setdefault("proj_on", 1)
+            cfg.setdefault("flip_h", 0)
+            cfg.setdefault("flip_v", 1)
+            return cfg
+    print(f"WARNING: no alignment_config.json found — using firmware defaults. "
+          "Optimizer will start from a wrong baseline.")
+    return {"fov": 60.0, "rot": 0.0, "x_off": 0.0, "y_off": 0.0,
+            "dist": 0.0, "proj_on": 1, "flip_h": 0, "flip_v": 1}
 
 
 def process_day(ds_dir: Path, static_config: dict, verbose: bool = False) -> dict | None:
@@ -321,11 +339,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--datasets", default="dataset_v2_*",
                     help="Glob pattern for dataset directories")
+    ap.add_argument("--config", default=None,
+                    help="Path to alignment_config.json (default: project-root file)")
     ap.add_argument("-v", "--verbose", action="store_true",
                     help="Print per-frame optimizer progress")
     args = ap.parse_args()
 
-    static_config = load_static_config()
+    static_config = load_static_config(args.config)
     ds_dirs = sorted(PROJECT_ROOT.glob(args.datasets))
     if not ds_dirs:
         print(f"No dataset directories match {args.datasets!r}", file=sys.stderr)
