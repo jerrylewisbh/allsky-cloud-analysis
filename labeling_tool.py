@@ -21,8 +21,6 @@ import streamlit as st
 from PIL import Image
 
 from auto_classify import classify as auto_classify
-from auto_classify_batch import reclassify_frame
-from mask_cleanup import clean_anomalous_pixels, log_cleanup
 
 CLASSES = ["clear", "ci", "cs_cc", "ac_as", "cu", "sc", "st", "ns_cb", "multi"]
 CLASS_DESCRIPTIONS = {
@@ -504,6 +502,123 @@ def render_decision_tree(frame_id: str, regime: str,
     return suggestion
 
 
+CLEANUP_LOG_CSV = PROJECT_ROOT / "labels" / "mask_cleanups.csv"
+CLEANUP_LOG_COLUMNS = [
+    "frame_id", "timestamp", "threshold", "neighborhood",
+    "n_pixels_marked", "n_pixels_valid_before", "labeler_id",
+]
+AUTO_LABEL_FIELDS = [
+    "frame_id", "auto_class", "auto_confidence", "auto_reasoning",
+    "thermal_mean_p", "thermal_std", "rgb_nrbr_p95",
+    "rgb_v_mean", "rgb_v_std", "alignment_mi", "computed_at",
+]
+
+
+def _clean_anomalous_pixels(mask: np.ndarray, threshold: float = 0.3,
+                            neighborhood: int = 5) -> tuple[np.ndarray, int]:
+    """Mark pixels that exceed their local 5×5 median by `threshold` probability
+    units. Used to remove isolated sensor contamination from a per-frame mask.
+    Returns (cleaned_mask, n_pixels_marked).
+    """
+    valid = mask != NO_DATA_VALUE
+    if not valid.any():
+        return mask.copy(), 0
+    p = mask.astype(np.float32) / 254.0
+    fill = float(np.median(p[valid]))
+    p_filled = np.where(valid, p, fill).astype(np.float32)
+    ksize = neighborhood if neighborhood in (3, 5) else 5
+    local_median = cv2.medianBlur(p_filled, ksize)
+    outliers = (p - local_median > threshold) & valid
+    cleaned = mask.copy()
+    cleaned[outliers] = NO_DATA_VALUE
+    return cleaned, int(outliers.sum())
+
+
+def _log_cleanup(frame_id: str, threshold: float, n_marked: int,
+                 n_valid_before: int, labeler_id: str) -> None:
+    """Append a cleanup-audit row so the methodology section can cite which
+    frames received treatment and at what threshold."""
+    CLEANUP_LOG_CSV.parent.mkdir(parents=True, exist_ok=True)
+    new_file = not CLEANUP_LOG_CSV.exists()
+    with open(CLEANUP_LOG_CSV, "a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=CLEANUP_LOG_COLUMNS)
+        if new_file:
+            w.writeheader()
+        w.writerow({
+            "frame_id": frame_id,
+            "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+            "threshold": f"{threshold:.2f}",
+            "neighborhood": 5,
+            "n_pixels_marked": n_marked,
+            "n_pixels_valid_before": n_valid_before,
+            "labeler_id": labeler_id,
+        })
+
+
+def _reclassify_one(pair: dict) -> dict | None:
+    """Recompute the auto_label row for a single frame and patch
+    auto_labels.csv in place. Mirrors auto_classify_batch.main()'s per-frame
+    logic but lives here so the labeling container doesn't need that module.
+    Returns the new row dict, or None if auto_labels.csv doesn't exist yet."""
+    if not AUTO_LABELS_CSV.exists():
+        return None
+    fid = pair["frame_id"]
+    mask_path = pair["mask_path"]
+    rgb_path = pair["rgb_path"]
+    mean_p, _, _, std_p = thermal_cloud_stats(mask_path)
+    nrbr_p95 = rgb_nrbr_p95(rgb_path, mask_path)
+    v_mean, v_std = rgb_v_stats(rgb_path, mask_path)
+    weak_mt = WEAK_LABELS_CSV.stat().st_mtime if WEAK_LABELS_CSV.exists() else 0.0
+    weak = load_weak_labels(str(WEAK_LABELS_CSV), weak_mt).get(fid, {})
+    # Alignment MI sidecar — best-effort, optional
+    align_mi: float | None = None
+    meta_p = Path(mask_path).parent.parent / "meta" / f"{Path(mask_path).stem}.json"
+    if meta_p.exists():
+        try:
+            import json
+            v = json.loads(meta_p.read_text()).get("alignment_mi")
+            align_mi = float(v) if v is not None else None
+        except (ValueError, TypeError, OSError):
+            align_mi = None
+
+    cls, conf, reasoning = auto_classify(
+        weak, thermal_mean_p=mean_p, rgb_nrbr_p95=nrbr_p95,
+        rgb_v_mean=v_mean, rgb_v_std=v_std, thermal_std=std_p,
+    )
+    new_row = {
+        "frame_id": fid,
+        "auto_class": cls,
+        "auto_confidence": conf,
+        "auto_reasoning": reasoning,
+        "thermal_mean_p": f"{mean_p:.3f}" if mean_p == mean_p else "",
+        "thermal_std": f"{std_p:.3f}" if std_p == std_p else "",
+        "rgb_nrbr_p95": f"{nrbr_p95:+.3f}" if nrbr_p95 is not None else "",
+        "rgb_v_mean": f"{v_mean:.1f}" if v_mean is not None else "",
+        "rgb_v_std": f"{v_std:.1f}" if v_std is not None else "",
+        "alignment_mi": f"{align_mi:.3f}" if align_mi is not None else "",
+        "computed_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+    }
+
+    # Read-modify-write the CSV. <100k rows so this is fine.
+    with open(AUTO_LABELS_CSV, newline="") as f:
+        reader = csv.DictReader(f)
+        fieldnames = reader.fieldnames or AUTO_LABEL_FIELDS
+        rows = list(reader)
+    found = False
+    for i, r in enumerate(rows):
+        if r["frame_id"] == fid:
+            rows[i] = {k: new_row.get(k, "") for k in fieldnames}
+            found = True
+            break
+    if not found:
+        rows.append({k: new_row.get(k, "") for k in fieldnames})
+    with open(AUTO_LABELS_CSV, "w", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+        w.writerows(rows)
+    return new_row
+
+
 def render_cleanup_panel(pair: dict, current_mean_p: float, colormap_name: str) -> None:
     """Per-frame sensor-contamination cleanup. Lets the labeler preview a
     median-filter outlier removal, then save the cleaned mask (with backup)
@@ -529,7 +644,7 @@ def render_cleanup_panel(pair: dict, current_mean_p: float, colormap_name: str) 
         state_key = f"cleanup_pending_{pair['frame_id']}"
         if preview_clicked:
             raw_mask = np.array(Image.open(pair["mask_path"]).convert("L"))
-            cleaned, n_marked = clean_anomalous_pixels(raw_mask, threshold=threshold)
+            cleaned, n_marked = _clean_anomalous_pixels(raw_mask, threshold=threshold)
             st.session_state[state_key] = {
                 "cleaned": cleaned,
                 "raw": raw_mask,
@@ -595,12 +710,9 @@ def render_cleanup_panel(pair: dict, current_mean_p: float, colormap_name: str) 
             if not Path(backup_path).exists():
                 cv2.imwrite(backup_path, raw_mask)
             cv2.imwrite(mask_path, cleaned)
-            log_cleanup(pair["frame_id"], pending["threshold"], n_marked,
-                        n_valid_before, labeler_id)
-            new_row = reclassify_frame(
-                pair["frame_id"], mask_path, pair["rgb_path"],
-                meta_path=_guess_meta_path(mask_path),
-            )
+            _log_cleanup(pair["frame_id"], pending["threshold"], n_marked,
+                         n_valid_before, labeler_id)
+            new_row = _reclassify_one(pair)
             # Clear caches so the next render reads the new mask + auto_label.
             thermal_cloud_stats.clear() if hasattr(thermal_cloud_stats, "clear") else None
             try:
@@ -627,13 +739,6 @@ def _colorize_array(raw: np.ndarray, colormap: str) -> np.ndarray:
     colored[(~valid) & stripe] = (60, 60, 60)
     colored[(~valid) & ~stripe] = (100, 100, 100)
     return colored
-
-
-def _guess_meta_path(mask_path: str) -> str | None:
-    """Derive the sidecar meta JSON path from a mask path."""
-    p = Path(mask_path)
-    meta = p.parent.parent / "meta" / f"{p.stem}.json"
-    return str(meta) if meta.exists() else None
 
 
 def colorize_mask(mask_path: str, colormap: str = "sky_cloud (custom)") -> np.ndarray:
