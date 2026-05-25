@@ -404,6 +404,22 @@ def classify(weak: dict[tuple, dict],
         return "ns_cb", "medium", \
                f"METAR {metar_genus} + GOES {goes_phase} top {goes_height:.0f}m"
 
+    # ---- Rule 4.5: layered multi-cloud detection (cu/sc below ci/cs) ----
+    # When GOES reports high-confidence cirriform cloud (ice phase at >8km)
+    # AND the local thermal patch shows STRUCTURED warm regions (texture +
+    # mid-to-high mean), the warm pixels can't be from the cold cirrus —
+    # there must be a lower cloud layer visible below/between the cirrus.
+    # Classic multi-cloud signature that the labeler often can't resolve
+    # visually because the cirrus is too thin to see against twilight RGB.
+    if (goes_phase == "ice" and goes_height is not None and goes_height > 8000
+            and thermal_mean_p is not None and thermal_mean_p > 0.30
+            and thermal_std is not None and thermal_std > 0.07):
+        return "multi", "medium", (
+            f"GOES high ice top {goes_height:.0f}m + textured warm thermal "
+            f"(mean={thermal_mean_p:.2f}, std={thermal_std:.2f}) → "
+            f"low/mid cloud layer below high cirriform = multi"
+        )
+
     # ---- Rule 5: family from GOES height (preferred) or METAR ----
     family = None
     family_reason = ""
