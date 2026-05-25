@@ -221,6 +221,27 @@ def process_frame(fp: FramePaths, config: dict) -> dict | None:
         thermal_raw = np.flip(thermal_raw, (0, 1))
     elif flip_h:
         thermal_raw = np.flip(thermal_raw, 1)
+
+    # Sensor corner contamination mask — the MLX's bottom-right FOV edge
+    # picks up a permanent warm gradient (horizon/housing/dust). Mark those
+    # pixels NaN so they're excluded from cloud-probability calculations.
+    # Configurable per deployment via config["corner_mask_rows"] /
+    # config["corner_mask_cols"]. Set to 0 to disable.
+    corner_rows = int(config.get("corner_mask_rows", 0))
+    corner_cols = int(config.get("corner_mask_cols", 0))
+    if corner_rows > 0 and corner_cols > 0:
+        # The flips above mean the "physical bottom-right" of the sensor maps
+        # to a specific corner of the post-flip array. With flip_v=1 (firmware
+        # default), the physical bottom is now the top. The contaminated
+        # physical-bottom-right shows up as TOP-right in the array.
+        if flip_v and not flip_h:
+            thermal_raw[:corner_rows, -corner_cols:] = np.nan
+        elif flip_h and not flip_v:
+            thermal_raw[-corner_rows:, :corner_cols] = np.nan
+        elif flip_h and flip_v:
+            thermal_raw[-corner_rows:, -corner_cols:] = np.nan
+        else:
+            thermal_raw[-corner_rows:, -corner_cols:] = np.nan
     elif flip_v:
         thermal_raw = np.flip(thermal_raw, 0)
 
@@ -266,6 +287,10 @@ def process_frame(fp: FramePaths, config: dict) -> dict | None:
     # inside the sensor". Erodes the valid region by ~1 px — exactly the
     # contamination width.
     invalid_thermal = (~valid_c) | (warped_valid < 0.999)
+    # Corner mask: if sensor corner pixels were NaN'd above, any warped pixel
+    # whose bilinear sample included those NaNs will itself be NaN. Mark them
+    # invalid too so they're excluded from mean/std stats.
+    invalid_thermal = invalid_thermal | np.isnan(warped_thermal)
 
     # ---- thermal cloud probability (per-pixel firmware physics) ----
     ambient = float(sensors.get("temp", 20.0))
