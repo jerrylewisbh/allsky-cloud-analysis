@@ -59,6 +59,59 @@ def sigmoid(x: np.ndarray) -> np.ndarray:
     return 1.0 / (1.0 + np.exp(-x))
 
 
+def alignment_mi_score(thermal_prob: np.ndarray, rgb_crop: np.ndarray,
+                       valid: np.ndarray, n_bins: int = 10) -> float | None:
+    """Mutual information between thermal-derived cloud probability and an
+    RGB-derived cloud probability (NRBR) over thermal-valid pixels.
+
+    High MI = thermal and RGB agree on WHERE cloud is, i.e. alignment is good.
+    Low MI = thermal cloud peaks fall on RGB-clear pixels (and vice versa),
+    i.e. the projection is misaligned (typically by 1-2 px due to wind drift,
+    thermal expansion of mount, etc.).
+
+    Daytime-only — at night the NRBR signal is meaningless (long-exposure
+    near-monochrome). Returns None when not enough valid pixels or RGB
+    range is too narrow to compute MI meaningfully.
+
+    Range: ~0 (random) to ~ln(n_bins) ≈ 2.3 with 10 bins (perfect agreement).
+    Typical well-aligned daytime cloud scene: 0.3-0.6.
+    """
+    if not valid.any():
+        return None
+    valid_count = int(valid.sum())
+    if valid_count < 200:
+        return None  # not enough samples for meaningful MI
+
+    # RGB cloud proxy: NRBR mapped to [0, 1]. Clouds tend to have low NRBR
+    # (whiter); clear sky has high NRBR (blue-dominant when negated to match
+    # the cloud=high convention used by thermal_prob).
+    b, g, r = cv2.split(rgb_crop.astype(np.float32))
+    nrbr = (r - b) / (r + b + 1e-6)  # [-1, 1]; negative = blue/clear, near 0 = whitish/cloud
+    rgb_cloud = np.clip(1.0 - (nrbr + 1.0) / 2.0, 0.0, 1.0)  # invert + normalize → cloud=high
+
+    t_vals = thermal_prob[valid]
+    r_vals = rgb_cloud[valid]
+
+    # If either signal has near-zero variance, MI is undefined / meaningless
+    if t_vals.std() < 0.02 or r_vals.std() < 0.02:
+        return None
+
+    # Bin both signals to discrete categories for MI computation
+    bins = np.linspace(0.0, 1.0, n_bins + 1)
+    t_bin = np.digitize(t_vals, bins)
+    r_bin = np.digitize(r_vals, bins)
+
+    # Joint and marginal histograms
+    joint = np.zeros((n_bins + 2, n_bins + 2), dtype=np.float64)
+    np.add.at(joint, (t_bin, r_bin), 1.0)
+    joint /= joint.sum()
+    p_t = joint.sum(axis=1, keepdims=True)
+    p_r = joint.sum(axis=0, keepdims=True)
+    pp = p_t @ p_r
+    nz = (joint > 0) & (pp > 0)
+    return float((joint[nz] * np.log(joint[nz] / pp[nz])).sum())
+
+
 def guided_filter(guide: np.ndarray, src: np.ndarray, radius: int, eps: float) -> np.ndarray:
     """He et al. 2010 guided filter, single-channel guide. Pure numpy."""
     guide = guide.astype(np.float32)
@@ -265,6 +318,15 @@ def process_frame(fp: FramePaths, config: dict) -> dict | None:
         mean_prob = float("nan")
         cloud_fraction = float("nan")
 
+    # Alignment quality (MI between thermal cloud-prob and RGB cloud-prob).
+    # Computed on the pre-resize arrays where both are at full crop resolution.
+    # Daytime only — at night NRBR is meaningless.
+    if lux >= LUX_NIGHT:
+        valid_mi_mask = ~invalid_thermal
+        mi_score = alignment_mi_score(p_combined, img_crop, valid_mi_mask)
+    else:
+        mi_score = None
+
     return {
         "img": img_out,
         "mask": mask_out,
@@ -277,6 +339,7 @@ def process_frame(fp: FramePaths, config: dict) -> dict | None:
             "mean_cloud_prob": mean_prob,
             "cloud_fraction_p50": cloud_fraction,
             "valid_fraction": valid_count / (OUTPUT_SIZE * OUTPUT_SIZE),
+            "alignment_mi": mi_score,  # None if night or unmeasurable
             "fw_sky_condition": sensors.get("sky_condition"),
             "fw_sky_cloud_fraction": sensors.get("sky_cloud_fraction"),
             "fw_sky_abs_cloud_fraction": sensors.get("sky_abs_cloud_fraction"),

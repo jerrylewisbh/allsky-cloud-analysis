@@ -98,15 +98,29 @@ def rgb_v_stats_in_valid_region(rgb_path: Path, mask_path: Path) -> tuple[float 
     return float(v_channel.mean()), float(v_channel.std())
 
 
-def discover_frames(datasets_glob: str) -> list[tuple[str, str, str]]:
-    """Returns list of (frame_id, mask_path, rgb_path)."""
+def discover_frames(datasets_glob: str) -> list[tuple[str, str, str, str]]:
+    """Returns list of (frame_id, mask_path, rgb_path, meta_path)."""
     out = []
     for ds in sorted(PROJECT_ROOT.glob(datasets_glob)):
         img_dir = ds / "images"
+        meta_dir = ds / "meta"
         for p in sorted((ds / "masks").glob("*.png")):
             rgb_path = img_dir / f"{p.stem}.jpg"
-            out.append((p.stem, str(p), str(rgb_path)))
+            meta_path = meta_dir / f"{p.stem}.json"
+            out.append((p.stem, str(p), str(rgb_path), str(meta_path)))
     return out
+
+
+def read_alignment_mi(meta_path: Path) -> float | None:
+    """Pull alignment_mi from the per-frame sidecar JSON written by make_masks_v2."""
+    try:
+        import json
+        with open(meta_path) as f:
+            meta = json.load(f)
+        v = meta.get("alignment_mi")
+        return float(v) if v is not None else None
+    except (FileNotFoundError, ValueError, KeyError, TypeError):
+        return None
 
 
 def load_weak_labels() -> dict[str, dict[tuple, dict]]:
@@ -139,10 +153,11 @@ def main():
     rows = []
     dist = Counter()
     conf_dist = Counter()
-    for i, (fid, mask_path, rgb_path) in enumerate(frames):
+    for i, (fid, mask_path, rgb_path, meta_path) in enumerate(frames):
         mp, mstd = thermal_stats(Path(mask_path))
         nrbr_p95 = rgb_nrbr_p95_in_valid_region(Path(rgb_path), Path(mask_path))
         v_mean, v_std = rgb_v_stats_in_valid_region(Path(rgb_path), Path(mask_path))
+        align_mi = read_alignment_mi(Path(meta_path))
         wf = weak.get(fid, {})
         cls, conf, reasoning = classify(wf, thermal_mean_p=mp,
                                          rgb_nrbr_p95=nrbr_p95,
@@ -159,6 +174,7 @@ def main():
             "rgb_nrbr_p95": f"{nrbr_p95:+.3f}" if nrbr_p95 is not None else "",
             "rgb_v_mean": f"{v_mean:.1f}" if v_mean is not None else "",
             "rgb_v_std": f"{v_std:.1f}" if v_std is not None else "",
+            "alignment_mi": f"{align_mi:.3f}" if align_mi is not None else "",
             "computed_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         })
         dist[cls] += 1
