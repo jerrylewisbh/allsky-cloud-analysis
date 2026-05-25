@@ -784,6 +784,51 @@ def _colorize_array(raw: np.ndarray, colormap: str) -> np.ndarray:
     return colored
 
 
+def gradient_view(mask_path: str, colormap: str = "sky_cloud (custom)",
+                  saturation: float = 0.3) -> np.ndarray:
+    """Sobel gradient magnitude of the cloud probability mask.
+
+    Highlights cloud EDGES rather than cloud INTENSITY. Useful for:
+      - Multi-cloud detection — sharp boundaries between distinct cloud regions
+        (e.g., Cu cells against background Ac sheet) light up strongly.
+      - Genus disambiguation — convective genera (Cu, Cb) have sharp boundaries
+        and high gradient; stratiform (St, Ns) have gradual transitions and low
+        gradient even at high mean_p.
+      - QC — a "speckly" gradient over an otherwise uniform region often
+        indicates residual sensor noise or sub-detection contamination.
+
+    Args:
+        saturation: gradient magnitude (prob/pixel) at which the colormap
+            saturates. 0.3 = moderately strong edges saturate; lower values
+            amplify subtle texture, higher values suppress it.
+    """
+    raw = np.array(Image.open(mask_path).convert("L"))
+    valid = raw != NO_DATA_VALUE
+    probs = np.where(valid, raw, 0).astype(np.float32) / 254.0
+
+    gx = cv2.Sobel(probs, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(probs, cv2.CV_32F, 0, 1, ksize=3)
+    mag = np.sqrt(gx * gx + gy * gy)
+
+    # Suppress edges along the no-data boundary itself — those are artifacts
+    # of the patch border, not real cloud edges. Erode the valid mask by 1px
+    # and only keep gradient values inside that eroded region.
+    valid_inner = cv2.erode(valid.astype(np.uint8), np.ones((3, 3), np.uint8)).astype(bool)
+    mag = np.where(valid_inner, mag, 0.0)
+
+    mag_norm = np.clip(mag / max(saturation, 1e-6), 0.0, 1.0)
+    mag_u8 = (mag_norm * 254).astype(np.uint8)
+    lut = COLORMAPS.get(colormap, SKY_CLOUD_LUT)
+    colored = lut[mag_u8]
+
+    # Match the heatmap's no-data stripe pattern for visual consistency
+    yy, xx = np.indices(raw.shape)
+    stripe = ((yy + xx) // 6) % 2 == 0
+    colored[(~valid) & stripe] = (60, 60, 60)
+    colored[(~valid) & ~stripe] = (100, 100, 100)
+    return colored
+
+
 def colorize_mask(mask_path: str, colormap: str = "sky_cloud (custom)") -> np.ndarray:
     raw = np.array(Image.open(mask_path).convert("L"))
     valid = raw != NO_DATA_VALUE
@@ -1317,6 +1362,24 @@ def main() -> None:
             min_value=0.05, max_value=0.95, value=0.5, step=0.05,
             help="Used by hard + contour styles. 0.5 = balanced; lower catches thin cloud, higher requires confidence.",
         ) if overlay_style in ("hard", "contour") else 0.5
+        show_gradient = st.checkbox(
+            "Edge gradient view (Sobel)",
+            value=False,
+            help=(
+                "Replaces the cloud-probability heatmap with the Sobel gradient "
+                "magnitude. Highlights cloud EDGES (sharp transitions) rather "
+                "than cloud intensity. Useful for spotting multi-cloud frames "
+                "(distinct cloud regions show sharp boundaries) and "
+                "distinguishing convective cells (sharp edges) from stratiform "
+                "sheets (gradual transitions)."
+            ),
+        )
+        gradient_saturation = st.slider(
+            "Gradient saturation",
+            min_value=0.10, max_value=0.80, value=0.30, step=0.05,
+            help="Gradient value (prob/pixel) at which the colormap saturates. "
+                 "Lower = amplify subtle texture; higher = only show strong edges.",
+        ) if show_gradient else 0.30
 
     # (weak_mtime hoisted to top of main() — used by both sidebar filter
     # and per-frame block.)
@@ -1579,11 +1642,20 @@ def main() -> None:
             use_container_width=True,
         )
     with img_cols[2]:
-        st.image(
-            colorize_mask(pair["mask_path"], colormap=colormap_name),
-            caption=f"Cloud probability heatmap ({colormap_name}) — grey diagonal stripe = no-data",
-            use_container_width=True,
-        )
+        if show_gradient:
+            st.image(
+                gradient_view(pair["mask_path"], colormap=colormap_name,
+                              saturation=gradient_saturation),
+                caption=(f"Sobel edge gradient ({colormap_name}, sat={gradient_saturation:.2f}) — "
+                         f"bright = sharp cloud boundary, dark = uniform region"),
+                use_container_width=True,
+            )
+        else:
+            st.image(
+                colorize_mask(pair["mask_path"], colormap=colormap_name),
+                caption=f"Cloud probability heatmap ({colormap_name}) — grey diagonal stripe = no-data",
+                use_container_width=True,
+            )
 
     render_cleanup_panel(pair, mean_p, colormap_name)
 
