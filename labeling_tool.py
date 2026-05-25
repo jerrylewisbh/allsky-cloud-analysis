@@ -516,8 +516,16 @@ AUTO_LABEL_FIELDS = [
 
 def _clean_anomalous_pixels(mask: np.ndarray, threshold: float = 0.3,
                             neighborhood: int = 5) -> tuple[np.ndarray, int]:
-    """Mark pixels that exceed their local 5×5 median by `threshold` probability
-    units. Used to remove isolated sensor contamination from a per-frame mask.
+    """Find sensor contamination via two stages:
+      1. SEEDS — pixels that exceed their local 5×5 median by `threshold`
+         probability units. Robust to isolated specks.
+      2. REGION GROW — each seed anchors its connected component of "bright
+         vs interior" pixels, catching contamination CLUSTERS that the
+         median-filter step alone misses (when neighbours are also bright,
+         the local median is itself elevated, so cluster bodies hide).
+    Growth is anchored: a connected component is only marked if it contains
+    a seed, so isolated real-cloud cells with no seed never get expanded.
+
     Returns (cleaned_mask, n_pixels_marked).
     """
     valid = mask != NO_DATA_VALUE
@@ -528,10 +536,43 @@ def _clean_anomalous_pixels(mask: np.ndarray, threshold: float = 0.3,
     p_filled = np.where(valid, p, fill).astype(np.float32)
     ksize = neighborhood if neighborhood in (3, 5) else 5
     local_median = cv2.medianBlur(p_filled, ksize)
-    outliers = (p - local_median > threshold) & valid
+    seeds = (p - local_median > threshold) & valid
+
+    if not seeds.any():
+        return mask.copy(), 0
+
+    # Interior baseline: median of valid pixels far from any seed (dilate
+    # seeds by 11px first so the baseline isn't contaminated by the cluster
+    # itself). Falls back to the global valid median if everything is
+    # near a seed.
+    seeds_u8 = seeds.astype(np.uint8)
+    seed_halo = cv2.dilate(seeds_u8, np.ones((11, 11), np.uint8)).astype(bool)
+    interior = valid & ~seed_halo
+    interior_med = float(np.median(p[interior])) if interior.any() else fill
+
+    # Grow: any valid pixel meaningfully brighter than the interior baseline
+    # is a *candidate* for masking. Growth threshold is softer (half the
+    # detection threshold) — once we have a real seed, we trust pixels much
+    # closer to seed brightness to belong to the same artifact.
+    growth_thr = threshold * 0.5
+    candidates = (p > interior_med + growth_thr) & valid
+
+    # Connected components on the candidate mask; keep only components that
+    # contain at least one seed. cv2.connectedComponents uses 8-connectivity
+    # by default when you pass connectivity=8.
+    n_lbl, labels = cv2.connectedComponents(
+        candidates.astype(np.uint8), connectivity=8)
+    seed_components = np.unique(labels[seeds])
+    seed_components = seed_components[seed_components != 0]  # drop background
+    if seed_components.size == 0:
+        # Shouldn't happen since seeds ⊂ candidates, but be defensive
+        anchored = seeds
+    else:
+        anchored = np.isin(labels, seed_components) & valid
+
     cleaned = mask.copy()
-    cleaned[outliers] = NO_DATA_VALUE
-    return cleaned, int(outliers.sum())
+    cleaned[anchored] = NO_DATA_VALUE
+    return cleaned, int(anchored.sum())
 
 
 def _log_cleanup(frame_id: str, threshold: float, n_marked: int,
