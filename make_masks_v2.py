@@ -347,11 +347,57 @@ def process_frame(fp: FramePaths, config: dict) -> dict | None:
     }
 
 
-def worker(fp: FramePaths, config: dict, out_root: Path):
+def _sun_regime(sun_alt_deg: float) -> str:
+    """DAY / TWILIGHT / NAUTICAL / ASTRO_DARK — matches compute_per_regime_transforms."""
+    if sun_alt_deg >= 6:
+        return "DAY"
+    if sun_alt_deg >= -6:
+        return "TWILIGHT"
+    if sun_alt_deg >= -12:
+        return "NAUTICAL"
+    return "ASTRO_DARK"
+
+
+def _config_for_frame(base_config: dict, frame_id: str,
+                      sun_alt_by_frame: dict[str, float] | None,
+                      transforms_by_regime: dict[str, dict] | None) -> tuple[dict, str | None]:
+    """Returns (config, regime_used) for one frame. When per-regime data isn't
+    available the base config is returned unchanged with regime_used=None.
+
+    Per-regime transforms override only (rot, x_off, y_off). The lens params
+    (fov, dist) stay at the static calibration."""
+    if not transforms_by_regime or sun_alt_by_frame is None:
+        return base_config, None
+    sun_alt = sun_alt_by_frame.get(frame_id)
+    if sun_alt is None:
+        return base_config, None
+    regime = _sun_regime(sun_alt)
+    override = transforms_by_regime.get(regime)
+    if override is None:
+        return base_config, None
+    cfg = dict(base_config)  # shallow copy is enough — we only overwrite scalars
+    cfg["rot"] = override["rot"]
+    cfg["x_off"] = override["x_off"]
+    cfg["y_off"] = override["y_off"]
+    return cfg, regime
+
+
+def worker(fp: FramePaths, base_config: dict, out_root: Path,
+           sun_alt_by_frame: dict[str, float] | None = None,
+           transforms_by_regime: dict[str, dict] | None = None):
     try:
-        result = process_frame(fp, config)
+        cfg, regime = _config_for_frame(base_config, fp.frame_id,
+                                        sun_alt_by_frame, transforms_by_regime)
+        result = process_frame(fp, cfg)
         if result is None:
             return fp.frame_id, False, "Skipped"
+
+        # Tag the meta with which regime + transform variant was applied
+        if regime is not None:
+            result["meta"]["regime"] = regime
+            result["meta"]["alignment_variant"] = "per_regime"
+        else:
+            result["meta"]["alignment_variant"] = "static"
 
         cv2.imwrite(str(out_root / "images" / f"{fp.frame_id}.jpg"), result["img"])
         cv2.imwrite(str(out_root / "masks" / f"{fp.frame_id}.png"), result["mask"])
@@ -360,6 +406,39 @@ def worker(fp: FramePaths, config: dict, out_root: Path):
         return fp.frame_id, True, None
     except Exception as e:
         return fp.frame_id, False, str(e)
+
+
+def _load_per_regime_transforms(out_root: Path) -> dict[str, dict] | None:
+    """Read transforms_by_regime.json from the output directory if present."""
+    path = out_root / "transforms_by_regime.json"
+    if not path.exists():
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+
+
+def _load_sun_alt_for_day(day: str) -> dict[str, float]:
+    """frame_id → sun_alt_deg from labels/weak_labels.csv ephemeris rows for the given day."""
+    csv_path = Path(__file__).parent / "labels" / "weak_labels.csv"
+    if not csv_path.exists():
+        return {}
+    import csv as csv_mod
+    out: dict[str, float] = {}
+    prefix = f"ccd1_{day}_"  # frame_id format
+    with open(csv_path, newline="") as f:
+        for row in csv_mod.DictReader(f):
+            fid = row.get("frame_id", "")
+            if not fid.startswith(prefix):
+                continue
+            if row["source"] == "ephemeris" and row["attribute"] == "sun_alt_deg":
+                try:
+                    out[fid] = float(row["value"])
+                except (TypeError, ValueError):
+                    pass
+    return out
 
 
 def main():
@@ -380,6 +459,10 @@ def main():
     parser.add_argument("--max-pairs", type=int, default=0, help="0 = all")
     parser.add_argument("--sample-stride", type=int, default=1)
     parser.add_argument("--jobs", type=int, default=os.cpu_count(), help="Number of parallel jobs")
+    parser.add_argument("--per-regime-align", action="store_true",
+                        help="Apply per-regime transforms from <output-root>/transforms_by_regime.json "
+                             "if present. Falls back to static config when the file is missing or "
+                             "a frame's regime isn't covered.")
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -389,6 +472,25 @@ def main():
     (out_root / "images").mkdir(parents=True, exist_ok=True)
     (out_root / "masks").mkdir(parents=True, exist_ok=True)
     (out_root / "meta").mkdir(parents=True, exist_ok=True)
+
+    # Optional per-regime alignment
+    transforms_by_regime: dict[str, dict] | None = None
+    sun_alt_by_frame: dict[str, float] | None = None
+    if args.per_regime_align:
+        transforms_by_regime = _load_per_regime_transforms(out_root)
+        if transforms_by_regime is None:
+            print(f"WARNING: --per-regime-align set but {out_root}/transforms_by_regime.json missing — "
+                  "falling back to static config for all frames")
+        else:
+            sun_alt_by_frame = _load_sun_alt_for_day(args.day)
+            if not sun_alt_by_frame:
+                print(f"WARNING: --per-regime-align set but no sun_alt available in "
+                      "labels/weak_labels.csv for this day — falling back to static config")
+                transforms_by_regime = None
+            else:
+                regimes_with_transforms = sorted(transforms_by_regime.keys())
+                print(f"per-regime alignment enabled: {len(regimes_with_transforms)} regimes "
+                      f"({', '.join(regimes_with_transforms)}), {len(sun_alt_by_frame)} frames with sun_alt")
 
     pairs = list(discover_pairs(Path(args.allsky_root), Path(args.thermal_root), args.day))
     if args.sample_stride > 1:
@@ -402,7 +504,9 @@ def main():
     ok = fail = 0
 
     with ProcessPoolExecutor(max_workers=args.jobs) as executor:
-        futures = [executor.submit(worker, fp, config, out_root) for fp in pairs]
+        futures = [executor.submit(worker, fp, config, out_root,
+                                   sun_alt_by_frame, transforms_by_regime)
+                   for fp in pairs]
 
         for i, future in enumerate(futures):
             fid, success, err = future.result()
