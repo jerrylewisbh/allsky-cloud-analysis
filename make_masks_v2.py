@@ -463,6 +463,9 @@ def main():
                         help="Apply per-regime transforms from <output-root>/transforms_by_regime.json "
                              "if present. Falls back to static config when the file is missing or "
                              "a frame's regime isn't covered.")
+    parser.add_argument("--skip-existing", action="store_true",
+                        help="Skip frames whose mask PNG already exists in the output. Use to resume "
+                             "an interrupted day's regen without redoing the frames already done.")
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -498,6 +501,14 @@ def main():
     if args.max_pairs > 0:
         idx = np.linspace(0, len(pairs) - 1, args.max_pairs, dtype=int)
         pairs = [pairs[i] for i in idx]
+
+    total_pairs = len(pairs)
+    if args.skip_existing:
+        masks_dir = out_root / "masks"
+        pairs = [p for p in pairs if not (masks_dir / f"{p.frame_id}.png").exists()]
+        skipped = total_pairs - len(pairs)
+        print(f"Resume mode: skipping {skipped} frames that already have masks "
+              f"({len(pairs)} new + {skipped} existing = {total_pairs} total)")
 
     print(f"Found {len(pairs)} paired frames for {args.day} — processing with {args.jobs} jobs")
     t0 = time.time()
