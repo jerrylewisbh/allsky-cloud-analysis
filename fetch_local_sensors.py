@@ -106,11 +106,15 @@ def main():
     if not frame_ids:
         return
 
-    # Determine date range from frame_ids
+    # Determine date range from frame_ids. Filename date prefixes are LOCAL
+    # dates but captures.timestamp is UTC, so widen by ±1 day to bracket any
+    # plausible local-UTC offset; the in-memory frame_id set then filters
+    # precisely.
     dates = sorted({m.group(1)[:8] for fid in frame_ids
                    if (m := re.search(r"(\d{8}_\d{6})", fid))})
-    start = args.start or f"{dates[0][:4]}-{dates[0][4:6]}-{dates[0][6:8]}"
-    end_date = dt.datetime.strptime(dates[-1], "%Y%m%d").date() + dt.timedelta(days=1)
+    start_date = dt.datetime.strptime(dates[0], "%Y%m%d").date() - dt.timedelta(days=1)
+    end_date = dt.datetime.strptime(dates[-1], "%Y%m%d").date() + dt.timedelta(days=2)
+    start = args.start or start_date.isoformat()
     end = args.end or end_date.isoformat()
     print(f"Querying PG for captures between {start} and {end}")
 

@@ -30,6 +30,7 @@ from pathlib import Path
 
 import netCDF4
 import numpy as np
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 PROJECT_ROOT = Path(__file__).parent.resolve()
 LABELS_DIR = PROJECT_ROOT / "labels"
@@ -47,6 +48,19 @@ DEFAULT_LON = None
 GOES_BUCKET = "noaa-goes19"
 S3_HTTPS_BASE = f"https://{GOES_BUCKET}.s3.amazonaws.com"
 SCAN_INTERVAL_MIN = 5  # CONUS scan cadence
+
+# Frame filenames (ccd1_YYYYMMDD_HHMMSS) are local wall-clock time on the
+# camera host. ALLSKY_LOCAL_TZ must be an IANA name (e.g. "America/Edmonton")
+# so DST is handled. Without it the snap-to-scan logic samples GOES from the
+# wrong moment by the local-UTC offset.
+def _resolve_local_tz() -> ZoneInfo:
+    name = os.environ.get("ALLSKY_LOCAL_TZ", "UTC")
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError:
+        sys.exit(f"ALLSKY_LOCAL_TZ={name!r} is not a known IANA timezone")
+
+LOCAL_TZ = _resolve_local_tz()
 
 # CONUS sectors have product code suffix C. GOES-19 ABI Level-2 product names.
 # NOTE: GOES-19 doesn't publish cloud-top *temperature* for CONUS (only full
@@ -196,14 +210,15 @@ def main():
 
     print(f"GOES-19 fetcher → products {args.products} at ({args.site_lat:.4f}, {args.site_lon:.4f})")
 
+    print(f"Filename timezone: {LOCAL_TZ.key} (set ALLSKY_LOCAL_TZ to change)")
     # Discover frames with timestamps
     frames: list[tuple[str, dt.datetime]] = []
     for ds in PROJECT_ROOT.glob(args.datasets):
         for p in (ds / "masks").glob("*.png"):
             m = re.search(r"(\d{8}_\d{6})", p.stem)
             if m:
-                ts = dt.datetime.strptime(m.group(1), "%Y%m%d_%H%M%S").replace(tzinfo=dt.timezone.utc)
-                frames.append((p.stem, ts))
+                ts_local = dt.datetime.strptime(m.group(1), "%Y%m%d_%H%M%S").replace(tzinfo=LOCAL_TZ)
+                frames.append((p.stem, ts_local.astimezone(dt.timezone.utc)))
     print(f"Discovered {len(frames)} dataset frames")
 
     # Snap each frame's timestamp to the nearest 5-min scan boundary

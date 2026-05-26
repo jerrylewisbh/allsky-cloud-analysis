@@ -28,12 +28,14 @@ import csv
 import datetime as dt
 import json
 import math
+import os
 import re
 import subprocess
 import sys
 from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 
 def http_get(url: str, timeout: int = 60) -> str:
@@ -60,6 +62,19 @@ ASOS_URL = (
 STATION_META_URL = "https://mesonet.agron.iastate.edu/json/network.py?network={network}"
 
 MATCH_WINDOW_S = 15 * 60  # ±15 min — standard in the literature
+
+# Frame filenames (ccd1_YYYYMMDD_HHMMSS) are encoded in the camera host's local
+# wall-clock time, not UTC. Set ALLSKY_LOCAL_TZ to an IANA name (e.g.
+# "America/Edmonton") so DST flips are handled correctly. Default UTC keeps
+# behavior identical for sites that actually run in UTC.
+def _resolve_local_tz() -> ZoneInfo:
+    name = os.environ.get("ALLSKY_LOCAL_TZ", "UTC")
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError:
+        sys.exit(f"ALLSKY_LOCAL_TZ={name!r} is not a known IANA timezone")
+
+LOCAL_TZ = _resolve_local_tz()
 
 # Cloud-group regex: SKC/CLR/NCD/NSC/CAVOK, or 3-letter coverage + 3-digit base.
 # Optional CB/TCU genus suffix.
@@ -208,8 +223,8 @@ def discover_frames(dataset_glob: str) -> list[tuple[str, dt.datetime]]:
             m = re.search(r"(\d{8}_\d{6})", stem)
             if not m:
                 continue
-            ts = dt.datetime.strptime(m.group(1), "%Y%m%d_%H%M%S").replace(tzinfo=dt.timezone.utc)
-            frames.append((stem, ts))
+            ts_local = dt.datetime.strptime(m.group(1), "%Y%m%d_%H%M%S").replace(tzinfo=LOCAL_TZ)
+            frames.append((stem, ts_local.astimezone(dt.timezone.utc)))
     return frames
 
 
@@ -250,6 +265,7 @@ def main():
     ap.add_argument("--match-window-s", type=int, default=MATCH_WINDOW_S, help="±seconds for METAR-to-frame match")
     args = ap.parse_args()
 
+    print(f"Filename timezone: {LOCAL_TZ.key} (set ALLSKY_LOCAL_TZ to change)")
     frames = discover_frames(args.datasets)
     if not frames:
         sys.exit(f"No frames found under {args.datasets}/{{meta/,images/}}")
