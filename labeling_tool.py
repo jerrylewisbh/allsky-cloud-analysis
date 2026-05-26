@@ -11,8 +11,10 @@ import csv
 import datetime as dt
 import os
 import re
+import sys
 import time
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import cv2
 import numpy as np
@@ -51,6 +53,18 @@ WEAK_LABELS_CSV = PROJECT_ROOT / "labels" / "weak_labels.csv"
 AUTO_LABELS_CSV = PROJECT_ROOT / "labels" / "auto_labels.csv"
 ALLSKY_ROOT = Path(os.environ.get("ALLSKY_ROOT", "/Volumes/allsky_images"))
 
+# Frame filenames (ccd1_YYYYMMDD_HHMMSS) are in the camera host's local
+# wall-clock time. ALLSKY_LOCAL_TZ should match what the fetchers use so the
+# UTC timestamps displayed here line up with weak_labels.csv.
+def _resolve_local_tz() -> ZoneInfo:
+    name = os.environ.get("ALLSKY_LOCAL_TZ", "UTC")
+    try:
+        return ZoneInfo(name)
+    except ZoneInfoNotFoundError:
+        sys.exit(f"ALLSKY_LOCAL_TZ={name!r} is not a known IANA timezone")
+
+LOCAL_TZ = _resolve_local_tz()
+
 OKTA_LABEL = {0: "0/8 SKC", 1: "1/8 FEW", 2: "2/8 FEW", 3: "3/8 SCT",
               4: "4/8 SCT", 5: "5/8 BKN", 6: "6/8 BKN", 7: "7/8 BKN", 8: "8/8 OVC"}
 LABEL_COLUMNS = [
@@ -82,13 +96,25 @@ def discover_pairs(root: Path, glob_pattern: str) -> list[dict]:
 
 
 def parse_timestamp(stem: str) -> dt.datetime | None:
+    """Return the real UTC datetime for a frame, decoding the filename time as
+    LOCAL_TZ. Use parse_local_date() when you need the local capture day for
+    UI grouping — converting via UTC would split evening frames into the next
+    date and surprise the user."""
     m = re.search(r"(\d{8}_\d{6})", stem)
     if not m:
         return None
     try:
-        return dt.datetime.strptime(m.group(1), "%Y%m%d_%H%M%S").replace(tzinfo=dt.timezone.utc)
+        ts_local = dt.datetime.strptime(m.group(1), "%Y%m%d_%H%M%S").replace(tzinfo=LOCAL_TZ)
+        return ts_local.astimezone(dt.timezone.utc)
     except ValueError:
         return None
+
+
+def parse_local_date(stem: str) -> str | None:
+    """Return the filename's local YYYYMMDD prefix without any TZ conversion.
+    The right tool for grouping frames by 'capture day' in the UI."""
+    m = re.search(r"(\d{8})_\d{6}", stem)
+    return m.group(1) if m else None
 
 
 def load_labels() -> pd.DataFrame:
@@ -1200,8 +1226,11 @@ def main() -> None:
         skip_labeled = st.checkbox("Skip already-labeled", value=True)
         st.markdown("**Filters** — applied with AND")
 
-        # Date filter
-        all_dates = sorted(list(set(p["timestamp"].strftime("%Y%m%d") for p in pairs if p["timestamp"])), reverse=True)
+        # Date filter — group by local capture day (from filename prefix), not
+        # by UTC, so evening frames don't split across two dates in the UI.
+        # date_prefix is later substring-matched against frame_id, which uses
+        # the same local YYYYMMDD prefix, so the comparison stays consistent.
+        all_dates = sorted({d for p in pairs if (d := parse_local_date(p["frame_id"]))}, reverse=True)
         date_filter = st.selectbox(
             "Date",
             ["any"] + all_dates,
