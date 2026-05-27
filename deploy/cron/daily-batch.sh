@@ -48,7 +48,6 @@ log "Step 1/4: Mask generation for ${DAY_DISPLAY}..."
 
 # Resolve the actual YYYYMMDD if it was empty (yesterday)
 ACTUAL_DAY=$(date -u -d "${DAY:-yesterday}" +%Y%m%d)
-DATASET_ARG="--datasets dataset_v2_${ACTUAL_DAY}"
 
 # 2. Parallel Processing:
 #    - GOES download (slow, network bound)
@@ -56,12 +55,12 @@ DATASET_ARG="--datasets dataset_v2_${ACTUAL_DAY}"
 log "Step 2/4: Starting metadata fetchers (GOES in background)..."
 if [ "${SKIP_FETCH}" = "0" ]; then
     log "GOES fetch running in background for ${ACTUAL_DAY}..."
-    ./deploy/cron/daily-goes.sh "${DATASET_ARG}" > /dev/null 2>&1 &
+    ./deploy/cron/daily-goes.sh --datasets "dataset_v2_${ACTUAL_DAY}" > /dev/null 2>&1 &
     GOES_PID=$!
     
     log "METAR and local sensors fetch for ${ACTUAL_DAY}..."
-    ./deploy/cron/daily-metar.sh "${DATASET_ARG}"
-    ./deploy/cron/daily-local-sensors.sh "${DATASET_ARG}"
+    ./deploy/cron/daily-metar.sh --datasets "dataset_v2_${ACTUAL_DAY}"
+    ./deploy/cron/daily-local-sensors.sh --datasets "dataset_v2_${ACTUAL_DAY}"
 else
     log "Step 2/4: SKIPPED (--skip-fetch)"
     GOES_PID=""
