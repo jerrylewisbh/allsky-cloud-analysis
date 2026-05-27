@@ -8,7 +8,8 @@ log "GOES-19 fetch — products: ${GOES_PRODUCTS}"
 # shellcheck disable=SC2086
 "${VENV}/bin/python" fetch_goes.py \
     --products ${GOES_PRODUCTS} \
-    --site-lat "${SITE_LAT}" --site-lon "${SITE_LON}"
+    --site-lat "${SITE_LAT}" --site-lon "${SITE_LON}" \
+    "$@"
 
 CACHE_MB=$(du -sm "${PROJECT_DIR}/goes_cache" 2>/dev/null | awk '{print $1}')
 log "GOES fetch done — cache size: ${CACHE_MB} MB"

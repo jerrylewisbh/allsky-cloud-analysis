@@ -41,30 +41,31 @@ done
 DAY_DISPLAY="${DAY:-yesterday}"
 log "=== Starting daily batch for ${DAY_DISPLAY} (jobs=${JOBS}${FORCE_FLAG:+, force}${SKIP_FETCH:+, skip-fetch}) ==="
 
-# 1. Fetch metadata (Metar + Local Sensors)
-if [ "${SKIP_FETCH}" = "0" ]; then
-    log "Step 1/4: Fetching METAR and local sensors..."
-    ./deploy/cron/daily-metar.sh
-    ./deploy/cron/daily-local-sensors.sh
-else
-    log "Step 1/4: SKIPPED (--skip-fetch)"
-fi
+# 1. Mask generation (fast/CPU bound)
+# This MUST happen first so the metadata fetchers have frame IDs to match against.
+log "Step 1/4: Mask generation for ${DAY_DISPLAY}..."
+./deploy/cron/daily-mask-gen.sh "${DAY}" "${JOBS}" "${FORCE_FLAG}"
+
+# Resolve the actual YYYYMMDD if it was empty (yesterday)
+ACTUAL_DAY=$(date -u -d "${DAY:-yesterday}" +%Y%m%d)
+DATASET_ARG="--datasets dataset_v2_${ACTUAL_DAY}"
 
 # 2. Parallel Processing:
 #    - GOES download (slow, network bound)
-#    - Mask generation (fast/CPU bound)
-log "Step 2/4: Starting GOES fetch and Mask generation (jobs=${JOBS})..."
+#    - METAR + Local Sensors (fast, I/O bound)
+log "Step 2/4: Starting metadata fetchers (GOES in background)..."
 if [ "${SKIP_FETCH}" = "0" ]; then
-    log "GOES fetch running in background..."
-    ./deploy/cron/daily-goes.sh > /dev/null 2>&1 &
+    log "GOES fetch running in background for ${ACTUAL_DAY}..."
+    ./deploy/cron/daily-goes.sh "${DATASET_ARG}" > /dev/null 2>&1 &
     GOES_PID=$!
+    
+    log "METAR and local sensors fetch for ${ACTUAL_DAY}..."
+    ./deploy/cron/daily-metar.sh "${DATASET_ARG}"
+    ./deploy/cron/daily-local-sensors.sh "${DATASET_ARG}"
 else
-    log "GOES fetch SKIPPED (--skip-fetch)"
+    log "Step 2/4: SKIPPED (--skip-fetch)"
     GOES_PID=""
 fi
-
-log "Mask generation starting for ${DAY_DISPLAY}..."
-./deploy/cron/daily-mask-gen.sh "${DAY}" "${JOBS}" "${FORCE_FLAG}"
 
 # 3. Wait for GOES to finish (if it was started)
 if [ -n "${GOES_PID}" ]; then
@@ -72,7 +73,7 @@ if [ -n "${GOES_PID}" ]; then
     wait "$GOES_PID"
     log "GOES fetch finished."
 else
-    log "Step 3/4: GOES skipped (no PID to wait for)"
+    log "Step 3/4: GOES skipped or already finished"
 fi
 
 # 4. Auto-classify

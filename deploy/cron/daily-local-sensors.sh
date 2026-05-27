@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Daily pull of AWNET weather + ESP sensors + ephemeris from PG.
+# Daily: query Postgres for local ESP32 + AWNET sensor readings and link them
+# to dataset frames. Idempotent.
 
 source "$(dirname "$0")/_common.sh"
 
@@ -9,6 +10,7 @@ log "Local sensors fetch from PG ${PG_HOST}:${PG_PORT}/${PG_DB}"
     --pg-port "${PG_PORT}" \
     --pg-db "${PG_DB}" \
     --pg-user "${PG_USER}" \
-    --pg-pass "${PG_PASS}"
+    --pg-pass "${PG_PASS}" \
+    "$@"
 
 log "Local sensors fetch done"
