@@ -450,17 +450,23 @@ def main():
                          "(default: exclude — bad lighting/optics aren't classifier failures)")
     ap.add_argument("--out", default=None,
                     help="Also write the report to this file (e.g. report.md)")
+    ap.add_argument("--auto", default=None,
+                    help="Path to an auto-labels CSV to score against (default "
+                         "labels/auto_labels.csv). Use a temp file to A/B rule "
+                         "changes without clobbering the production labels.")
     args = ap.parse_args()
+
+    auto_csv = Path(args.auto) if args.auto else AUTO_CSV
 
     if not HAND_CSV.exists():
         print(f"ERROR: {HAND_CSV} not found.")
         return
-    if not AUTO_CSV.exists():
-        print(f"ERROR: {AUTO_CSV} not found. Run auto_classify_batch.py first.")
+    if not auto_csv.exists():
+        print(f"ERROR: {auto_csv} not found. Run auto_classify_batch.py first.")
         return
 
     hand = pd.read_csv(HAND_CSV)
-    auto = pd.read_csv(AUTO_CSV)
+    auto = pd.read_csv(auto_csv)
     regimes = load_regimes()
 
     n_qc_excluded = 0
@@ -479,7 +485,7 @@ def main():
     print(file=out)
     print("  ALLSKY CLOUD CLASSIFIER — HAND vs AUTO ANALYSIS", file=out)
     print(f"  Hand labels: {HAND_CSV}", file=out)
-    print(f"  Auto labels: {AUTO_CSV}", file=out)
+    print(f"  Auto labels: {auto_csv}", file=out)
 
     section_overall(out, merged, hand, auto, n_qc_excluded)
     if len(merged) > 0:

@@ -119,6 +119,22 @@ def classify(weak: dict[tuple, dict],
     is_night = sun_alt is not None and sun_alt < 0.0
     csi_std = _get(weak, "derived", "csi_std_10min", as_float=True)
 
+    # ---- Rule -1: layered multi-cloud (high cirrus over a lower warm layer) ----
+    # GOES high COLD ice cloud cannot produce warm thermal pixels. When GOES
+    # reports an ice top while the local thermal patch shows WARM, textured
+    # pixels, the warmth must come from a second, lower layer below/between the
+    # cirrus → multi. Must run before Rule 0, whose night-texture branch would
+    # otherwise return ac_as. The mean ceiling (<=0.65) keeps this disjoint from
+    # the opaque glaciated-deck case (Rule 5 ns_cb / Sc, mean>0.6 + uniform).
+    if (goes_phase == "ice" and goes_height is not None and goes_height > 6000
+            and thermal_mean_p is not None and 0.25 < thermal_mean_p <= 0.65
+            and thermal_std is not None and thermal_std > 0.10):
+        return "multi", "low", (
+            f"GOES high ice top {goes_height:.0f}m + warm textured thermal "
+            f"(mean={thermal_mean_p:.2f}, std={thermal_std:.2f}) → "
+            f"high cirrus over a lower layer = multi"
+        )
+
     # ---- Rule 0: thermal spatial-variance texture (overrides clear cascade) ----
     # True-clear thermal_std tops out near 0.04 in this dataset, so 0.07 is a
     # safe floor for "structured". The mean lower bound is dropped because
@@ -353,6 +369,20 @@ def classify(weak: dict[tuple, dict],
         # FOV mismatch, not as evidence against clear. For majority_path
         # (multiple weaker local clears), METAR still blocks since the
         # local evidence is less rock-solid.
+        # Thin-cirrus exception to the FOV-mismatch rule: if the thermal patch
+        # is blind (veto) but BOTH GOES and METAR independently report a
+        # frozen/mixed-phase cloud, it isn't a clear-overhead/cloudy-airport
+        # mismatch — it's high thin cloud below the thermal sensitivity floor.
+        # Water-phase regional cloud still falls through to the clear return
+        # (preserving the deliberate "trust local thermal" design).
+        if (veto_path and not rgb_suspicious
+                and goes_mask == 1 and goes_phase in ("ice", "mixed")
+                and metar_okta is not None and metar_okta >= 6):
+            return "cs_cc", "low", (
+                f"thermal blind (thermal_p={thermal_mean_p:.2f}) but GOES+METAR "
+                f"agree {goes_phase} cloud (METAR {metar_okta}/8) → thin Cs/Cc "
+                "invisible to thermal"
+            )
         if veto_path:
             block = rgb_suspicious
         else:
@@ -429,6 +459,23 @@ def classify(weak: dict[tuple, dict],
             f"GOES high ice top {goes_height:.0f}m + textured warm thermal "
             f"(mean={thermal_mean_p:.2f}, std={thermal_std:.2f}) → "
             f"low/mid cloud layer below high cirriform = multi"
+        )
+
+    # ---- Rule 4.6: glaciated opaque deck → ns_cb (before family forces low) ----
+    # A uniform opaque deck (thermal_mean_p>0.6, low std) whose tops are FROZEN
+    # (GOES phase ice/mixed) is glaciated deep cloud (Ns/Cb), not warm low Sc —
+    # true Sc is water-phase. The rain gauge often lags onset, so rain=0 doesn't
+    # rule out Ns. Without this, Rule 5 below forces family="low" on high opacity
+    # and Rule 6 returns Sc. Conservative guard: require uniformity (std<0.10) so
+    # textured altostratus isn't swept in. Low confidence — labeler verifies.
+    if (thermal_mean_p is not None and thermal_mean_p > 0.6
+            and goes_phase in ("ice", "mixed")
+            and metar_okta is not None and metar_okta >= 6
+            and thermal_std is not None and thermal_std < 0.10):
+        return "ns_cb", "low", (
+            f"opaque uniform deck (thermal_p={thermal_mean_p:.2f}, "
+            f"std={thermal_std:.2f}) + frozen tops (phase={goes_phase}) + "
+            f"METAR {metar_okta}/8 → glaciated deep cloud (ns_cb)"
         )
 
     # ---- Rule 5: family from GOES height (preferred) or METAR ----
