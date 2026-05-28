@@ -375,13 +375,21 @@ def classify(weak: dict[tuple, dict],
         # mismatch — it's high thin cloud below the thermal sensitivity floor.
         # Water-phase regional cloud still falls through to the clear return
         # (preserving the deliberate "trust local thermal" design).
-        if (veto_path and not rgb_suspicious
+        # RGB whiteness band is the separator vs genuinely-clear twilight: a
+        # truly clear sky stays strongly blue (nrbr_p95 ~ -0.47) even when the
+        # distant airport reports overcast, whereas thin cirrus overhead lifts
+        # nrbr_p95 into the -0.40..-0.15 band. Without the lower bound this rule
+        # flips clear twilight frames (GOES+METAR see a regional deck) to cs_cc.
+        thin_cirrus_whiteness = (
+            rgb_nrbr_p95 is not None and -0.40 < rgb_nrbr_p95 <= -0.15
+        )
+        if (veto_path and thin_cirrus_whiteness
                 and goes_mask == 1 and goes_phase in ("ice", "mixed")
                 and metar_okta is not None and metar_okta >= 6):
             return "cs_cc", "low", (
                 f"thermal blind (thermal_p={thermal_mean_p:.2f}) but GOES+METAR "
-                f"agree {goes_phase} cloud (METAR {metar_okta}/8) → thin Cs/Cc "
-                "invisible to thermal"
+                f"agree {goes_phase} cloud (METAR {metar_okta}/8) + RGB whiteness "
+                f"(nrbr_p95={rgb_nrbr_p95:+.2f}) → thin Cs/Cc invisible to thermal"
             )
         if veto_path:
             block = rgb_suspicious
