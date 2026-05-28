@@ -38,9 +38,12 @@ import cv2
 import numpy as np
 
 # ---- physics thresholds (mirror docs/sky-condition.md and firmware) ----
-ABS_THRESHOLD_C = -8.0       # warmer than this absolute => cloud  (was -18, was -5 orig)
-REL_DELTA_C = -12.0          # warmer than (ambient + REL_DELTA) => cloud  (was -20, was -10 orig)
-SIGMOID_SIGMA_C = 3.0        # softness of the cloud transition (°C)  (was 6, original)
+# Overridable via env vars so the threshold choice can be A/B-tested without a
+# code edit, e.g. to reproduce the pre-2026-05-24 values:
+#   THERMAL_ABS_C=-18 THERMAL_REL_C=-20 THERMAL_SIGMA_C=6 python make_masks_v2.py ...
+ABS_THRESHOLD_C = float(os.environ.get("THERMAL_ABS_C", -8.0))   # warmer than this absolute => cloud  (was -18, was -5 orig)
+REL_DELTA_C = float(os.environ.get("THERMAL_REL_C", -12.0))      # warmer than (ambient + REL_DELTA) => cloud  (was -20, was -10 orig)
+SIGMOID_SIGMA_C = float(os.environ.get("THERMAL_SIGMA_C", 3.0))  # softness of the cloud transition (°C)  (was 6, original)
 
 # ---- day / night handling (lux from sensors block) ----
 LUX_NIGHT = 1.0              # below: thermal-only
@@ -492,6 +495,9 @@ def main():
                         help="Skip frames whose mask PNG already exists in the output. Use to resume "
                              "an interrupted day's regen without redoing the frames already done.")
     args = parser.parse_args()
+
+    print(f"Thermal thresholds: ABS={ABS_THRESHOLD_C}C  REL={REL_DELTA_C}C  "
+          f"SIGMA={SIGMOID_SIGMA_C}C  (override via THERMAL_ABS_C/THERMAL_REL_C/THERMAL_SIGMA_C)")
 
     with open(args.config) as f:
         config = json.load(f)

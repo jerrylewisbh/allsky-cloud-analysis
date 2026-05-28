@@ -204,7 +204,11 @@ def reclassify_frame(frame_id: str, mask_path: str, rgb_path: str,
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--datasets", default="dataset_v2_*")
+    ap.add_argument("--out", default=str(AUTO_LABELS_CSV),
+                    help="output CSV path (default labels/auto_labels.csv). "
+                         "Use a temp path for A/B runs so the production file isn't clobbered.")
     args = ap.parse_args()
+    out_csv = Path(args.out)
 
     weak = load_weak_labels()
     hand = load_hand_labels()
@@ -243,14 +247,14 @@ def main():
         if (i + 1) % 500 == 0:
             print(f"  {i + 1}/{len(frames)} classified")
 
-    AUTO_LABELS_CSV.parent.mkdir(parents=True, exist_ok=True)
-    with open(AUTO_LABELS_CSV, "w", newline="") as f:
+    out_csv.parent.mkdir(parents=True, exist_ok=True)
+    with open(out_csv, "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         w.writeheader()
         w.writerows(rows)
 
     print()
-    print(f"Wrote {len(rows)} rows to {AUTO_LABELS_CSV}")
+    print(f"Wrote {len(rows)} rows to {out_csv}")
 
     print("\nAuto-label class distribution:")
     for c, n in dist.most_common():
