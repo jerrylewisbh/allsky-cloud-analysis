@@ -32,6 +32,8 @@ TOTAL_DAYS=$(echo "${NAS_DAYS}" | wc -l)
 log "Found ${TOTAL_DAYS} day(s) on NAS"
 PROCESSED=0
 SKIPPED=0
+PROCESSED_DAYS=""   # accumulates days we (re)generated masks for, so we can
+                    # refresh their weak labels afterwards
 
 for DAY in ${NAS_DAYS}; do
     # Count raw frames on NAS for this day
@@ -60,6 +62,32 @@ for DAY in ${NAS_DAYS}; do
     # Call daily-mask-gen.sh which handles --skip-existing logic
     "$(dirname "$0")/daily-mask-gen.sh" "${DAY}" "${JOBS}" "${FORCE_FLAG}"
     PROCESSED=$((PROCESSED + 1))
+    PROCESSED_DAYS="${PROCESSED_DAYS} ${DAY}"
 done
+
+# Generating masks alone leaves the backfilled days with no weak labels — the
+# whole point of the safety net is to recover days the daily run missed, so we
+# must also run the metadata fetchers + auto-classify for exactly those days.
+# Share daily-batch's flock so we never read-merge-write weak_labels.csv at the
+# same time as a daily run; wait (don't skip) if one is in progress.
+if [ -n "${PROCESSED_DAYS}" ]; then
+    log "Refreshing weak labels for backfilled day(s):${PROCESSED_DAYS}"
+    (
+        if ! flock -w 7200 200; then
+            log "Could not acquire daily-batch lock within 2h — skipping label refresh (masks are still generated; re-run later)"
+            exit 0
+        fi
+        for DAY in ${PROCESSED_DAYS}; do
+            log "  fetching metadata for ${DAY}..."
+            "$(dirname "$0")/daily-metar.sh"         --datasets "dataset_v2_${DAY}"
+            "$(dirname "$0")/daily-local-sensors.sh" --datasets "dataset_v2_${DAY}"
+            "$(dirname "$0")/daily-goes.sh"          --datasets "dataset_v2_${DAY}"
+        done
+        log "  regenerating auto-labels..."
+        "$(dirname "$0")/daily-auto-classify.sh"
+    ) 200>"${LOG_DIR}/daily-batch.lock"
+else
+    log "No days backfilled — skipping label refresh"
+fi
 
 log "=== Backfill done: ${PROCESSED} day(s) processed, ${SKIPPED} skipped ==="
