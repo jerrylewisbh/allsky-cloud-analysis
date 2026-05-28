@@ -24,6 +24,17 @@ set -e
 cd "$(dirname "$0")/../.."
 source "deploy/cron/_common.sh"
 
+# Prevent overlapping runs. We previously saw doubled log lines / duplicate
+# work when a cron invocation overlapped with a manual run (or a prior run
+# that hadn't finished). A non-blocking flock makes the second invocation
+# exit cleanly instead of racing.
+LOCKFILE="${LOG_DIR}/daily-batch.lock"
+exec 200>"${LOCKFILE}"
+if ! flock -n 200; then
+    log "Another daily-batch is already running (lock: ${LOCKFILE}) — exiting."
+    exit 0
+fi
+
 DAY="${1:-}"
 JOBS="${2:-4}"
 

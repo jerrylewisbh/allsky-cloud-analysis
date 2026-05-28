@@ -8,26 +8,30 @@
 
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# Run all jobs on a fixed UTC clock so the schedule is independent of the
+# server's local timezone and of DST shifts. Times below are UTC.
+CRON_TZ=UTC
 PROJECT_DIR_ROOT=/home/YOURUSER/allsky-cloud-analysis
 LOG_DIR=/var/log/allsky-cloud-analysis
 
-# Daily 04:00 local — generate masks for yesterday's captures.
-# Uses --skip-existing by default — safe to re-run without wasting work.
-0 4 * * * $PROJECT_DIR_ROOT/deploy/cron/daily-mask-gen.sh >> $LOG_DIR/daily-mask-gen.log 2>&1
+# Daily 08:00 UTC — full pipeline via the single orchestrator.
+#
+# Why one entry instead of separate per-step jobs: the metadata fetchers
+# (METAR / local sensors / GOES) match against frame IDs discovered from the
+# generated masks, so mask-gen MUST finish before they run. daily-batch.sh
+# enforces that order (mask-gen → metar+sensors+GOES → auto-classify) and
+# holds a flock so overlapping runs can't race. Splitting these back into
+# independent cron times reintroduces the ordering bug (fetchers running
+# before yesterday's masks exist → only GOES gets labeled).
+#
+# Why 08:00 UTC: the camera names frames in LOCAL time, so "yesterday local"
+# isn't fully captured until after local midnight (06:00 UTC at UTC-6, 07:00
+# at UTC-7). 08:00 UTC clears that boundary year-round, and GOES scans for the
+# last local-evening frames are on S3 by then. daily-batch defaults the target
+# day to UTC-yesterday, which matches the local date at this hour.
+0 8 * * * $PROJECT_DIR_ROOT/deploy/cron/daily-batch.sh >> $LOG_DIR/daily-batch.log 2>&1
 
-# Weekly Sun 06:00 — backfill any missed days (catches days where the
-# daily cron failed or didn't run). Idempotent via --skip-existing.
-0 6 * * 0 $PROJECT_DIR_ROOT/deploy/cron/backfill-missing-days.sh >> $LOG_DIR/backfill-missing-days.log 2>&1
-
-# Daily 02:00 — METAR (both stations)
-0 2 * * * $PROJECT_DIR_ROOT/deploy/cron/daily-metar.sh >> $LOG_DIR/daily-metar.log 2>&1
-
-# Daily 02:30 — local AWNET + ESP sensors from PG
-30 2 * * * $PROJECT_DIR_ROOT/deploy/cron/daily-local-sensors.sh >> $LOG_DIR/daily-local-sensors.log 2>&1
-
-# Daily 05:00 — GOES-19 ABI products (~1–2 hr).
-# Bumped from 03:00 to clear the daily backup_to_nas.sh window.
-0 5 * * * $PROJECT_DIR_ROOT/deploy/cron/daily-goes.sh >> $LOG_DIR/daily-goes.log 2>&1
-
-# Daily 08:00 — regenerate auto_labels.csv (after GOES finishes)
-0 8 * * * $PROJECT_DIR_ROOT/deploy/cron/daily-auto-classify.sh >> $LOG_DIR/daily-auto-classify.log 2>&1
+# Weekly Sun 11:00 UTC — backfill any missed days (catches days where the
+# daily run failed or didn't run). Idempotent via --skip-existing. Scheduled
+# after the daily run's GOES window to avoid contending for it.
+0 11 * * 0 $PROJECT_DIR_ROOT/deploy/cron/backfill-missing-days.sh >> $LOG_DIR/backfill-missing-days.log 2>&1
