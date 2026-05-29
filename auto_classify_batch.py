@@ -214,6 +214,9 @@ def main():
     hand = load_hand_labels()
     frames = discover_frames(args.datasets)
     print(f"Frames: {len(frames)}  ·  weak-label coverage: {len(weak)}  ·  hand labels: {len(hand)}")
+    if not frames:
+        print(f"No frames matched '{args.datasets}' — nothing to classify.")
+        return
 
     rows = []
     dist = Counter()

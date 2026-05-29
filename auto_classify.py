@@ -116,7 +116,12 @@ def classify(weak: dict[tuple, dict],
     # rgb_v_night is the long-exposure RGB and is meaningful any time the sun
     # is down, including civil/nautical twilight.
     is_day = sun_alt is not None and sun_alt > 0.0
-    is_night = sun_alt is not None and sun_alt < 0.0
+    # Exactly at the horizon (sun_alt == 0.0) counts as night so the texture
+    # branch in Rule 0 and the night genus logic still fire — otherwise both
+    # is_day and is_night would be False and a textured frame would silently
+    # fall through with its evidence discarded. When sun_alt is None (no
+    # ephemeris) both stay False, which is the correct "unknown" degradation.
+    is_night = sun_alt is not None and sun_alt <= 0.0
     csi_std = _get(weak, "derived", "csi_std_10min", as_float=True)
 
     # ---- Rule -1: layered multi-cloud (high cirrus over a lower warm layer) ----
@@ -126,7 +131,18 @@ def classify(weak: dict[tuple, dict],
     # cirrus → multi. Must run before Rule 0, whose night-texture branch would
     # otherwise return ac_as. The mean ceiling (<=0.65) keeps this disjoint from
     # the opaque glaciated-deck case (Rule 5 ns_cb / Sc, mean>0.6 + uniform).
-    if (goes_phase == "ice" and goes_height is not None and goes_height > 6000
+    #
+    # Yield to Rule 4.5 when its stronger layered signature holds (top >8km,
+    # mean>0.30, std>0.07): both rules emit "multi", but 4.5 is medium-confidence
+    # and this one is low, so without this guard the higher-confidence verdict is
+    # unreachable in the overlap. Safe to fall through: goes_height>=7000 already
+    # skips Rule 0 (high_family_from_goes), so these frames can't be misrouted to
+    # Rule 0's night branch — they reach Rule 4.5 via the vote cascade.
+    strong_layered = (goes_height is not None and goes_height > 8000
+                      and thermal_mean_p is not None and thermal_mean_p > 0.30
+                      and thermal_std is not None and thermal_std > 0.07)
+    if (not strong_layered
+            and goes_phase == "ice" and goes_height is not None and goes_height > 6000
             and thermal_mean_p is not None and 0.25 < thermal_mean_p <= 0.65
             and thermal_std is not None and thermal_std > 0.10):
         return "multi", "low", (
@@ -250,11 +266,11 @@ def classify(weak: dict[tuple, dict],
             v = False
         votes.append(("csi", v, f"csi={csi:.2f}", True))
     elif is_day and csi is not None and sun_alt is not None and 0 <= sun_alt <= 10:
-        # Low-sun (sun_alt 0-10°): only register a weak cloud signal if CSI
-        # is implausibly low (< 0.5 implies real cloud, not just path-length
-        # attenuation). Never vote strong-cloud or strong-clear here.
-        v = None if csi < 0.5 else None  # always weak in this regime
-        # Abstain entirely if CSI is in the plausible-low-sun band
+        # Low-sun (sun_alt 0-10°): never vote strong-cloud or strong-clear here —
+        # path-length attenuation makes CSI unreliable. Only an implausibly low
+        # CSI (< 0.3) implies real cloud rather than attenuation, and then only
+        # as a single weak vote. In the plausible-low-sun band (csi >= 0.3),
+        # abstain entirely.
         if csi >= 0.3:
             pass  # don't append a vote — abstain
         else:
