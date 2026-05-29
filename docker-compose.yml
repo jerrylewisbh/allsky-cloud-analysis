@@ -18,6 +18,9 @@ services:
       - .env
     ports:
       - "8000:8000"
+    dns:
+      - 10.0.0.227
+      - 8.8.8.8
     depends_on:
       - db
 
