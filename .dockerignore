@@ -1,0 +1,6 @@
+# The api image only needs the api/ package and requirements.txt.
+# Ignore everything, then re-include just those — keeps the build context
+# tiny regardless of how large datasets/goes_cache/crops grow on the server.
+*
+!api/
+!requirements.txt
