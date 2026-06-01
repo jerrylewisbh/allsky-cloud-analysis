@@ -25,6 +25,7 @@ SQLALCHEMY_DATABASE_URL = f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@db:
 LAT = float(os.getenv("LOCATION_LATITUDE", "51.05"))
 LON = float(os.getenv("LOCATION_LONGITUDE", "-114.07"))
 CWOP_ID = os.getenv("CWOP_ID", "")
+ELEVATION_M = float(os.getenv("STATION_ELEVATION_M", "1043"))
 LPM_API_KEY = os.getenv("LPM_API_KEY", "")
 HA_WEBHOOK_URL = os.getenv("HA_WEBHOOK_URL", "")
 
@@ -42,6 +43,17 @@ while not connected:
     except Exception as e:
         print(f"Waiting for DB... {e}")
         time.sleep(2)
+
+
+def altimeter_setting_hpa(station_pressure_hpa, elevation_m):
+    # NWS/ASOS altimeter setting: reduce station pressure to sea level using the
+    # standard atmosphere ONLY (no temperature term). This is what CWOP/MADIS
+    # require, vs. the GW3000's relative pressure, whose temperature influence
+    # produces the diurnal error that fails the MADIS std-dev check at altitude.
+    p = station_pressure_hpa - 0.3
+    if p <= 0:
+        return None
+    return p * (1 + 8.4228807e-5 * elevation_m / p ** 0.190284) ** (1 / 0.190284)
 
 
 def send_to_cwop(raw_data, cwop_id, lat, lon, source="ESP32"):
@@ -76,8 +88,16 @@ def send_to_cwop(raw_data, cwop_id, lat, lon, source="ESP32"):
         hum_raw = raw_data.get('humidity', raw_data.get('hum'))
         hum_val = int(round(float(hum_raw or 0))) if hum_raw is not None else None
         
+        # CWOP wants the altimeter setting. Compute it ourselves from absolute
+        # (station) pressure + elevation rather than forwarding the GW's
+        # temperature-influenced relative pressure. Fall back to pre-reduced
+        # values only if baromabsin is absent.
+        barom_abs_in = raw_data.get('baromabsin')
         pres_hpa = raw_data.get('pres')
-        if pres_hpa is not None:
+        if barom_abs_in is not None:
+            alt_hpa = altimeter_setting_hpa(float(barom_abs_in) * 33.8639, ELEVATION_M)
+            barom_mb_tenths = int(round(alt_hpa * 10)) if alt_hpa is not None else None
+        elif pres_hpa is not None:
             barom_mb_tenths = int(round(float(pres_hpa) * 10))
         else:
             barom_in = raw_data.get('baromrelin')
