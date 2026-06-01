@@ -56,6 +56,15 @@ def altimeter_setting_hpa(station_pressure_hpa, elevation_m):
     return p * (1 + 8.4228807e-5 * elevation_m / p ** 0.190284) ** (1 / 0.190284)
 
 
+def altimeter_hpa_from_data(raw_data):
+    # Altimeter setting (hPa) from the Ecowitt absolute-pressure field.
+    # Returns None when baromabsin is absent so callers can fall back.
+    barom_abs_in = raw_data.get('baromabsin')
+    if barom_abs_in is None:
+        return None
+    return altimeter_setting_hpa(float(barom_abs_in) * 33.8639, ELEVATION_M)
+
+
 def send_to_cwop(raw_data, cwop_id, lat, lon, source="ESP32"):
     global last_cwop_push_time
     
@@ -92,11 +101,10 @@ def send_to_cwop(raw_data, cwop_id, lat, lon, source="ESP32"):
         # (station) pressure + elevation rather than forwarding the GW's
         # temperature-influenced relative pressure. Fall back to pre-reduced
         # values only if baromabsin is absent.
-        barom_abs_in = raw_data.get('baromabsin')
+        alt_hpa = altimeter_hpa_from_data(raw_data)
         pres_hpa = raw_data.get('pres')
-        if barom_abs_in is not None:
-            alt_hpa = altimeter_setting_hpa(float(barom_abs_in) * 33.8639, ELEVATION_M)
-            barom_mb_tenths = int(round(alt_hpa * 10)) if alt_hpa is not None else None
+        if alt_hpa is not None:
+            barom_mb_tenths = int(round(alt_hpa * 10))
         elif pres_hpa is not None:
             barom_mb_tenths = int(round(float(pres_hpa) * 10))
         else:
@@ -166,17 +174,22 @@ def send_to_cwop(raw_data, cwop_id, lat, lon, source="ESP32"):
         print(f"  CWOP Error: {e}")
         last_cwop_push_time = 0
 
-def forward_to_home_assistant(body: bytes, content_type: str):
-    # GW3000 supports only one push destination, so the API fans out the raw
-    # form body to HA's Ecowitt webhook. PASSKEY identifies the device on the
-    # HA side, so forward bytes verbatim rather than re-encoding a dict.
+def forward_to_home_assistant(data: dict):
+    # GW3000 supports only one push destination, so the API fans out to HA's
+    # Ecowitt webhook. We override baromrelin with the computed altimeter
+    # setting so HA's "relative pressure" matches what we report to CWOP;
+    # baromabsin and every other field (incl. PASSKEY) are forwarded as-is.
     if not HA_WEBHOOK_URL:
         return
     try:
+        payload = dict(data)
+        alt_hpa = altimeter_hpa_from_data(data)
+        if alt_hpa is not None:
+            payload['baromrelin'] = f"{alt_hpa / 33.8639:.3f}"  # hPa → inHg
         requests.post(
             HA_WEBHOOK_URL,
-            data=body,
-            headers={"Content-Type": content_type or "application/x-www-form-urlencoded"},
+            data=urllib.parse.urlencode(payload),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
             timeout=5,
         )
     except Exception as e:
@@ -236,7 +249,7 @@ async def ambient_weather_interceptor(request: Request, call_next):
                 # Fan out to HA after the response flushes — never block the station.
                 bg = None
                 if HA_WEBHOOK_URL and body_bytes:
-                    bg = BackgroundTask(forward_to_home_assistant, body_bytes, content_type)
+                    bg = BackgroundTask(forward_to_home_assistant, data)
                 return Response(
                     content='{"status":"success"}',
                     media_type="application/json",
