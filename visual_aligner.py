@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 import argparse
 from pathlib import Path
-from thermal_utils import reshape_thermal, fill_corners_clear
+from thermal_utils import reshape_thermal, fill_corners_clear, KEEP
 
 def build_maps(a_w, a_h, t_w, t_h, allsky_fov_deg, thermal_fov_deg, rot_deg, offset_x_pct, offset_y_pct, distortion, proj_on):
     # Apply offsets to the optical center of the allsky image
@@ -291,7 +291,19 @@ def main(input_file, allsky_root, thermal_root, ccd_uuid):
             # Blend
             alpha_mask = np.zeros((a_h, a_w, 1), dtype=np.float32)
             alpha_mask[valid_mask] = alpha
-            
+
+            # Clipped enclosure corners -> 0 alpha (they vanish). Warp the corner
+            # KEEP mask through the same projection and fold it into the alpha.
+            keep_t = KEEP.astype(np.float32)
+            if keep_t.shape == (t_h, t_w):
+                kf = keep_t
+                if flip_h and flip_v: kf = cv2.flip(kf, -1)
+                elif flip_h: kf = cv2.flip(kf, 1)
+                elif flip_v: kf = cv2.flip(kf, 0)
+                warped_keep = cv2.remap(kf, map_x, map_y, cv2.INTER_NEAREST,
+                                        borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+                alpha_mask = alpha_mask * warped_keep[:, :, None]
+
             blended = img_a_ui.astype(np.float32) * (1.0 - alpha_mask) + \
                       thermal_warped.astype(np.float32) * alpha_mask
             
