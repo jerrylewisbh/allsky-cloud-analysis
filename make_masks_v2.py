@@ -319,7 +319,16 @@ def process_frame(fp: FramePaths, config: dict) -> dict | None:
         # Guided-filter refinement: use grayscale RGB as the guide so cloud
         # edges in RGB transfer onto the low-res thermal probability.
         gray = cv2.cvtColor(img_crop, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
-        p_thermal_refined = guided_filter(gray, p_thermal, GUIDED_RADIUS, GUIDED_EPS)
+        # The guided filter is box-convolution based, so ANY NaN in p_thermal
+        # (corner mask + eroded FOV edge) spreads across the full filter radius
+        # and — after two box passes — floods the entire crop, poisoning the
+        # refined map to all-NaN. That blanked every daytime frame to an empty
+        # mask. Fill invalid pixels with the valid-region mean before filtering;
+        # the no-data mask below (invalid_thermal) restores them afterwards.
+        finite = p_thermal[np.isfinite(p_thermal)]
+        fill_val = float(finite.mean()) if finite.size else 0.0
+        p_thermal_fill = np.where(np.isnan(p_thermal), fill_val, p_thermal)
+        p_thermal_refined = guided_filter(gray, p_thermal_fill, GUIDED_RADIUS, GUIDED_EPS)
         p_thermal_refined = np.clip(p_thermal_refined, 0.0, 1.0)
 
         # Day blend: thermal as anchor (0.6), RGB (0.4) — RGB only refines, never overrides
