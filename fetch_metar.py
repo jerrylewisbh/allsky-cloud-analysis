@@ -42,7 +42,12 @@ def http_get(url: str, timeout: int = 60) -> str:
     """Use curl so we inherit the macOS system trust store. The python.org
     installer ships its own CA bundle that won't trust corporate MITM."""
     r = subprocess.run(
-        ["curl", "-sS", "--fail", "--max-time", str(timeout), url],
+        # IEM ASOS enforces a 1s-per-IP throttle (HTTP 429) since 2026-04-21,
+        # and returns 503 under load. curl --retry natively backs off on
+        # 429/503/timeouts, so a transient throttle retries instead of aborting
+        # the whole batch.
+        ["curl", "-sS", "--fail", "--retry", "5", "--retry-delay", "2",
+         "--max-time", str(timeout), url],
         capture_output=True, text=True,
     )
     if r.returncode != 0:
