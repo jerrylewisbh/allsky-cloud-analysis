@@ -44,6 +44,10 @@ PICK_MI_MIN = 0.10
 PICK_MI_MAX = 0.50
 PICK_N_PER_REGIME = 5
 
+# Skip near-uniform thermal frames (clear / flat overcast): MI alignment needs
+# cloud structure or the fit drifts. Kept-region std in degC.
+MIN_STRUCT_STD = 2.0
+
 # Regime gating (matches analyze_labels / weak_labels_reference)
 REGIME_ORDER = ["DAY", "TWILIGHT", "NAUTICAL", "ASTRO_DARK"]
 
@@ -155,6 +159,11 @@ def _load_frame_for_optimizer(ds_dir: Path, frame_id: str) -> tuple | None:
         return None
     thermal_raw, sensors = load_thermal(raw_path)
     if thermal_raw is None:
+        return None
+    # MI-based alignment needs cloud structure; skip near-uniform (clear / flat
+    # overcast) frames where the fit is unconstrained and drifts. (corners are
+    # NaN here, so use nanstd.)
+    if float(np.nanstd(thermal_raw)) < MIN_STRUCT_STD:
         return None
     ambient_c = ambient_from_sensors(sensors)
     return thermal_raw, ambient_c, img_full

@@ -3,7 +3,7 @@ import numpy as np
 import json
 import argparse
 from pathlib import Path
-from thermal_utils import reshape_thermal, fill_corners_clear
+from thermal_utils import reshape_thermal, fill_corners_clear, KEEP
 
 def load_thermal(json_path):
     with open(json_path, 'r') as f:
@@ -75,6 +75,17 @@ def main():
     parser.add_argument('--uuid', type=str, default='ccd_25ccc900-4f15-4ac2-9d29-507e89f7c212', help='Thermal CCD UUID')
     parser.add_argument('--config', default='alignment_config.json', help='Path to config file')
     parser.add_argument('--max-samples', type=int, default=10, help='Max images to sample from a directory (for speed)')
+    parser.add_argument('--min-struct-std', type=float, default=2.0,
+                        help='Skip frames whose kept-region thermal std is below this. MI needs '
+                             'cloud structure to lock; clear/uniform-overcast frames just add noise.')
+    parser.add_argument('--search-bound', type=float, nargs=4, default=[3.0, 3.0, 0.03, 0.03],
+                        metavar=('FOV', 'ROT', 'XOFF', 'YOFF'),
+                        help='Max +/- deviation from the seed (manual config) for each param. Refine-only.')
+    parser.add_argument('--improve-margin', type=float, default=0.01,
+                        help='Required relative MI gain over the seed to accept (default 1%%).')
+    parser.add_argument('--overwrite', action='store_true',
+                        help='If improved by the margin, overwrite the config in place. Default is '
+                             'non-destructive: write alignment_config.auto.json and keep the manual config.')
     args = parser.parse_args()
 
     input_p = Path(args.input_path).resolve()
@@ -152,14 +163,22 @@ def main():
     # 4. Pre-load all images into memory
     print("Loading images into memory...")
     loaded_pairs = []
+    skipped_uniform = 0
     for a_path, t_path in valid_pairs:
         img_a = cv2.imread(str(a_path), cv2.IMREAD_GRAYSCALE)
         if img_a is None: continue
         img_a = cv2.resize(img_a, (400, 400)) # Downsample for speed
-        
+
         thermal_raw = load_thermal(str(t_path))
         if thermal_raw is None: continue
-        
+
+        # MI alignment needs cloud structure; skip near-uniform (clear / flat
+        # overcast) frames where the MI surface is flat and the fit drifts.
+        sstd = float(np.std(thermal_raw[KEEP])) if thermal_raw.shape == KEEP.shape else float(np.std(thermal_raw))
+        if sstd < args.min_struct_std:
+            skipped_uniform += 1
+            continue
+
         if p.get('flip_h', 0) and p.get('flip_v', 1):
             thermal_raw = np.flip(thermal_raw, (0, 1))
         elif p.get('flip_h', 0):
@@ -169,15 +188,22 @@ def main():
             
         loaded_pairs.append((img_a, thermal_raw))
 
+    if skipped_uniform:
+        print(f"  Skipped {skipped_uniform} near-uniform frame(s) (std < {args.min_struct_std}C) — no MI structure.")
     if not loaded_pairs:
-        print("Error: Failed to load image data.")
+        print(f"No frames with enough cloud structure (std >= {args.min_struct_std}C). "
+              f"Alignment needs broken cloud; nothing changed. Try a cloudier window or lower --min-struct-std.")
         return
+    print(f"Using {len(loaded_pairs)} structured frame(s) for alignment.")
 
-    # 5. Optimization Loop
+    # 5. Optimization Loop (refine-only: bounded around the seed/manual config)
     current = [p['fov'], p['rot'], p['x_off'], p['y_off']]
+    seed = list(current)
+    bound = args.search_bound
     steps = [1.0, 1.0, 0.01, 0.01]
-    
+
     best_mi = evaluate_batch(loaded_pairs, current, p['dist'])
+    initial_mi = best_mi
     
     print(f"\nStarting batch auto-alignment search...")
     print(f"Initial: FOV={current[0]}, Rot={current[1]}, X={current[2]}, Y={current[3]} (Base MI: {best_mi:.4f})")
@@ -188,7 +214,12 @@ def main():
             for direction in [-1, 1]:
                 test_params = list(current)
                 test_params[i] += steps[i] * direction
-                
+                # refine-only: clamp within +/- bound of the seed (manual config)
+                lo, hi = seed[i] - bound[i], seed[i] + bound[i]
+                test_params[i] = max(lo, min(hi, test_params[i]))
+                if test_params[i] == current[i]:
+                    continue  # at the bound, no move
+
                 mi = evaluate_batch(loaded_pairs, test_params, p['dist'])
                 
                 if mi > best_mi:
@@ -201,19 +232,34 @@ def main():
             steps = [s * 0.5 for s in steps]
             if steps[0] < 0.1: break # Converged
 
-    # 6. Save results
+    # 6. Save results — guarded so a low-signal run can't silently degrade the
+    #    trusted manual config.
     p.update({
         "fov": round(current[0], 2),
         "rot": round(current[1], 2),
         "x_off": round(current[2], 3),
         "y_off": round(current[3], 3)
     })
-    
-    with open(config_path, 'w') as f:
+    improvement = best_mi - initial_mi
+    rel = improvement / abs(initial_mi) if initial_mi not in (0, -1) else 0.0
+    print(f"\nMI: seed {initial_mi:.4f} -> final {best_mi:.4f}  (delta {improvement:+.4f}, {rel*100:+.1f}%)")
+    print(f"Params: FOV={current[0]:.2f} Rot={current[1]:.2f} X={current[2]:.3f} Y={current[3]:.3f}"
+          f"  (seed FOV={seed[0]:.2f} Rot={seed[1]:.2f} X={seed[2]:.3f} Y={seed[3]:.3f})")
+
+    accepted = rel >= args.improve_margin
+    if args.overwrite and accepted:
+        target = config_path
+        print(f"[ACCEPTED] gain >= {args.improve_margin*100:.0f}% -> overwriting {target}")
+    else:
+        target = config_path.with_suffix('.auto.json')
+        if args.overwrite and not accepted:
+            print(f"[KEPT MANUAL] gain < {args.improve_margin*100:.0f}% -> did NOT touch {config_path}. "
+                  f"Candidate written to {target} for inspection.")
+        else:
+            print(f"[NON-DESTRUCTIVE] candidate written to {target} (re-run with --overwrite to promote when gain is real).")
+
+    with open(target, 'w') as f:
         json.dump(p, f, indent=4)
-        
-    print("\n[SUCCESS] Batch optimization converged.")
-    print(f"New global parameters saved to {config_path}")
 
 if __name__ == "__main__":
     main()

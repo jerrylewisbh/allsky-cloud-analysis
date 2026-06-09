@@ -211,23 +211,33 @@ def main(input_file, allsky_root, thermal_root, ccd_uuid):
     map_x = map_y = valid_mask = None
 
     def load_images(idx):
-        nonlocal img_a_ui, img_t_raw, a_h, a_w, t_h, t_w, force_update
-        a_path, t_path = valid_pairs[idx]
-        img_a = cv2.imread(str(a_path))
-        img_t_raw = load_thermal_image(t_path)
-        
-        # Resize allsky to a manageable size for fluid real-time UI
-        UI_SIZE = 800
-        img_a_ui = cv2.resize(img_a, (UI_SIZE, UI_SIZE), interpolation=cv2.INTER_AREA)
-        
-        a_h, a_w = img_a_ui.shape[:2]
-        t_h, t_w = img_t_raw.shape[:2]
-        
-        print(f"Loaded [{idx+1}/{len(valid_pairs)}]: {a_path.name}")
-        force_update = True
+        nonlocal img_a_ui, img_t_raw, a_h, a_w, t_h, t_w, force_update, current_idx
+        n = len(valid_pairs)
+        # Find the next loadable pair starting at idx; skip unreadable/corrupt
+        # frames instead of crashing on a None image.
+        for off in range(n):
+            j = (idx + off) % n
+            a_path, t_path = valid_pairs[j]
+            img_a = cv2.imread(str(a_path))
+            it = load_thermal_image(t_path)
+            if img_a is None or it is None:
+                print(f"  skip [{j+1}/{n}] {a_path.name}: unreadable allsky or thermal")
+                continue
+            img_t_raw = it
+            current_idx = j
+            UI_SIZE = 800  # Resize allsky for a fluid real-time UI
+            img_a_ui = cv2.resize(img_a, (UI_SIZE, UI_SIZE), interpolation=cv2.INTER_AREA)
+            a_h, a_w = img_a_ui.shape[:2]
+            t_h, t_w = img_t_raw.shape[:2]
+            print(f"Loaded [{j+1}/{n}]: {a_path.name}")
+            force_update = True
+            return True
+        print("No loadable thermal/allsky pairs found.")
+        return False
 
     # Load the initial image
-    load_images(current_idx)
+    if not load_images(current_idx):
+        return
 
     while True:
         proj_on = cv2.getTrackbarPos('Proj 1=On', 'Visual Aligner')

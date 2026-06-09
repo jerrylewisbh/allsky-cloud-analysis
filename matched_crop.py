@@ -19,7 +19,7 @@ def load_thermal_data(thermal_bmp_path):
     except Exception: pass
     return None, None
 
-def get_hybrid_mask(img_rgb, thermal_frame, ambient, abs_thresh=-20.0):
+def get_hybrid_mask(img_rgb, thermal_frame, ambient, abs_thresh=-3.0):  # windowed (was -20 bare-sky)
     h, w = img_rgb.shape[:2]
     
     # 1. Thermal Confidence (The Absolute Truth)
