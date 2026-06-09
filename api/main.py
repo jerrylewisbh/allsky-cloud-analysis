@@ -294,3 +294,17 @@ def get_latest(db: Session = Depends(get_db)):
 
 @app.get("/health")
 def health(): return {"status": "ok"}
+
+@app.get("/ambient")
+def get_ambient(db: Session = Depends(get_db)):
+    """Lightweight ambient temperature for the ESP sky-thermal station.
+    Returns the latest Ecowitt outdoor temp (tempf) converted to degC. The
+    payload is tiny so the ESP's HTTP client never truncates it (unlike /latest,
+    which carries the capture + thermal_frame and overran the rx buffer)."""
+    lw = db.query(models.WeatherRecord).order_by(models.WeatherRecord.timestamp.desc()).first()
+    tempf = (lw.raw_data or {}).get("tempf") if lw and lw.raw_data else None
+    try:
+        tempc = round((float(tempf) - 32.0) * 5.0 / 9.0, 2)
+    except (TypeError, ValueError):
+        tempc = None
+    return {"tempc": tempc}
