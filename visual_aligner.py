@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import argparse
 from pathlib import Path
+from thermal_utils import reshape_thermal, fill_corners_clear
 
 def build_maps(a_w, a_h, t_w, t_h, allsky_fov_deg, thermal_fov_deg, rot_deg, offset_x_pct, offset_y_pct, distortion, proj_on):
     # Apply offsets to the optical center of the allsky image
@@ -72,13 +73,7 @@ def load_thermal_image(thermal_bmp_path):
                 data = json.load(f)
             
             if 'frame' in data:
-                raw_frame_1d = np.array(data['frame'], dtype=np.float32)
-                if len(raw_frame_1d) == 768:
-                    raw_frame = raw_frame_1d.reshape((24, 32))
-                elif len(raw_frame_1d) == 384:
-                    raw_frame = raw_frame_1d.reshape((16, 24))
-                else:
-                    raise ValueError(f"Unknown frame size: {len(raw_frame_1d)}")
+                raw_frame = fill_corners_clear(reshape_thermal(data['frame'])[0])
                 
                 # Normalize the temperatures to 0-255
                 min_val = np.min(raw_frame)

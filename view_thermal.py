@@ -6,8 +6,8 @@ import time
 
 # Configuration
 URL = "http://10.0.0.242/json"
-WIDTH = 24
-HEIGHT = 16
+WIDTH = 32   # full frame (was 24x16 cropped)
+HEIGHT = 24
 
 # 36-color continuous heatmap palette (Cold -> Hot)
 # Blues -> Cyan -> Green -> Yellow -> Orange -> Red -> Magenta -> White
@@ -53,7 +53,7 @@ def main():
                 
                 frame = data.get("frame", [])
                 sensors = data.get("sensors", {})
-                ambient = sensors.get("temp", 25.0)
+                ambient = sensors.get("ambient", sensors.get("temp", 25.0))
                 
                 if not frame or len(frame) != WIDTH * HEIGHT:
                     print("Error: Received invalid frame data.")

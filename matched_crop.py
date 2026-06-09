@@ -3,6 +3,7 @@ import numpy as np
 import json
 import argparse
 from pathlib import Path
+from thermal_utils import reshape_thermal, fill_corners_clear, ambient_from_sensors
 
 def load_thermal_data(thermal_bmp_path):
     json_path = Path(thermal_bmp_path).with_suffix('.json')
@@ -11,10 +12,10 @@ def load_thermal_data(thermal_bmp_path):
         with open(json_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         if 'frame' in data:
-            raw_frame_1d = np.array(data['frame'], dtype=np.float32)
-            ambient = data.get('sensors', {}).get('temp', 20.0)
-            if len(raw_frame_1d) == 768: return raw_frame_1d.reshape((24, 32)), ambient
-            elif len(raw_frame_1d) == 384: return raw_frame_1d.reshape((16, 24)), ambient
+            ambient = ambient_from_sensors(data.get('sensors', {}))
+            frame2d, _ = reshape_thermal(data['frame'])
+            # Clipped corners read warm -> would become false cloud after warp.
+            return fill_corners_clear(frame2d), ambient
     except Exception: pass
     return None, None
 
@@ -130,7 +131,10 @@ def main():
     parser.add_argument('--config', default='allsky-cloud-analysis/alignment_config.json')
     parser.add_argument('--output-dir', type=str, default='ml_dataset_hybrid')
     parser.add_argument('--size', type=int, default=256)
-    parser.add_argument('--abs-thresh', type=float, default=-20.0)
+    # Windowed-hardware cutoff (ZnSe ~+19C warm offset; clear sky ~-6C). Was
+    # -20 (bare sky) which marked everything as cloud. Matches the firmware's
+    # CLOUD_PIXEL_ABS_CUTOFF (-3). Refine on a confirmed clear night.
+    parser.add_argument('--abs-thresh', type=float, default=-3.0)
     parser.add_argument('--max-pairs', type=int, default=0)
     args = parser.parse_args()
     input_p = Path(args.input_path).resolve()

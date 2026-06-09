@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import argparse
 from datetime import datetime
+from thermal_utils import reshape_thermal, fill_corners_clear, KEEP
 
 def load_thermal_image(thermal_bmp_path):
     # Check if a .json file exists alongside the .bmp
@@ -15,13 +16,7 @@ def load_thermal_image(thermal_bmp_path):
                 data = json.load(f)
             
             if 'frame' in data:
-                raw_frame_1d = np.array(data['frame'], dtype=np.float32)
-                if len(raw_frame_1d) == 768:
-                    raw_frame = raw_frame_1d.reshape((24, 32))
-                elif len(raw_frame_1d) == 384:
-                    raw_frame = raw_frame_1d.reshape((16, 24))
-                else:
-                    raise ValueError(f"Unknown frame size: {len(raw_frame_1d)}")
+                raw_frame = fill_corners_clear(reshape_thermal(data['frame'])[0])
                 
                 # Normalize the temperatures to 0-255
                 min_val = np.min(raw_frame)
@@ -34,6 +29,9 @@ def load_thermal_image(thermal_bmp_path):
                 
                 # Apply a high dynamic range colormap (INFERNO is great for heat)
                 color_frame = cv2.applyColorMap(norm_frame, cv2.COLORMAP_INFERNO)
+                # Clipped enclosure corners -> black (no panel alpha; black = gone)
+                if color_frame.shape[:2] == KEEP.shape:
+                    color_frame[~KEEP] = 0
                 return color_frame
         except Exception as e:
             print(f"Failed to parse json {json_path}: {e}")

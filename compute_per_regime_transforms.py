@@ -32,6 +32,7 @@ import numpy as np
 
 from align_optimize import optimize_alignment
 from make_masks_v2 import load_thermal
+from thermal_utils import ambient_from_sensors
 
 
 PROJECT_ROOT = Path(__file__).parent.resolve()
@@ -155,7 +156,7 @@ def _load_frame_for_optimizer(ds_dir: Path, frame_id: str) -> tuple | None:
     thermal_raw, sensors = load_thermal(raw_path)
     if thermal_raw is None:
         return None
-    ambient_c = float(sensors.get("temp", 20.0)) if sensors else 20.0
+    ambient_c = ambient_from_sensors(sensors)
     return thermal_raw, ambient_c, img_full
 
 

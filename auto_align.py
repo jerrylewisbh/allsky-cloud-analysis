@@ -3,14 +3,17 @@ import numpy as np
 import json
 import argparse
 from pathlib import Path
+from thermal_utils import reshape_thermal, fill_corners_clear
 
 def load_thermal(json_path):
     with open(json_path, 'r') as f:
         data = json.load(f)
-    raw = np.array(data['frame'], dtype=np.float32)
-    if len(raw) == 768: return raw.reshape((24, 32))
-    if len(raw) == 384: return raw.reshape((16, 24))
-    return None
+    try:
+        frame2d, _ = reshape_thermal(data['frame'])
+    except ValueError:
+        return None
+    # Clipped corners (warm enclosure) would bias the MI alignment -> fill clear.
+    return fill_corners_clear(frame2d)
 
 def get_mutual_information(img1, img2, bins=20):
     hgram, x_edges, y_edges = np.histogram2d(img1.ravel(), img2.ravel(), bins=bins)

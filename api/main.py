@@ -297,14 +297,19 @@ def health(): return {"status": "ok"}
 
 @app.get("/ambient")
 def get_ambient(db: Session = Depends(get_db)):
-    """Lightweight ambient temperature for the ESP sky-thermal station.
-    Returns the latest Ecowitt outdoor temp (tempf) converted to degC. The
-    payload is tiny so the ESP's HTTP client never truncates it (unlike /latest,
-    which carries the capture + thermal_frame and overran the rx buffer)."""
+    """Lightweight ambient temp + light level for the ESP sky-thermal station.
+    Returns the latest Ecowitt outdoor temp (tempf->degC) and an approximate lux
+    from solar irradiance (W/m^2 * 126 lm/W; ~0 at night). Tiny payload so the
+    ESP's HTTP client never truncates it (unlike /latest)."""
     lw = db.query(models.WeatherRecord).order_by(models.WeatherRecord.timestamp.desc()).first()
-    tempf = (lw.raw_data or {}).get("tempf") if lw and lw.raw_data else None
+    raw = (lw.raw_data or {}) if lw else {}
     try:
-        tempc = round((float(tempf) - 32.0) * 5.0 / 9.0, 2)
+        tempc = round((float(raw.get("tempf")) - 32.0) * 5.0 / 9.0, 2)
     except (TypeError, ValueError):
         tempc = None
-    return {"tempc": tempc}
+    try:
+        # solarradiation is W/m^2; ~126 lm/W is the luminous efficacy of daylight.
+        lux = round(float(raw.get("solarradiation")) * 126.0, 1)
+    except (TypeError, ValueError):
+        lux = None
+    return {"tempc": tempc, "lux": lux}

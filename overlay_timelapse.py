@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 import argparse
 from datetime import datetime
+from thermal_utils import reshape_thermal, fill_corners_clear, KEEP
 
 def load_thermal_image(thermal_bmp_path):
     # Check if a .json file exists alongside the .bmp
@@ -15,13 +16,7 @@ def load_thermal_image(thermal_bmp_path):
                 data = json.load(f)
             
             if 'frame' in data:
-                raw_frame_1d = np.array(data['frame'], dtype=np.float32)
-                if len(raw_frame_1d) == 768:
-                    raw_frame = raw_frame_1d.reshape((24, 32))
-                elif len(raw_frame_1d) == 384:
-                    raw_frame = raw_frame_1d.reshape((16, 24))
-                else:
-                    raise ValueError(f"Unknown frame size: {len(raw_frame_1d)}")
+                raw_frame = fill_corners_clear(reshape_thermal(data['frame'])[0])
                 
                 # Normalize the temperatures to 0-255
                 min_val = np.min(raw_frame)
@@ -167,6 +162,17 @@ def generate_overlay(date_str, allsky_root, thermal_root, output_file, ccd_uuid,
     # Prepare alpha blending mask for fast vectorized operations
     alpha_mask = np.zeros((a_h, a_w, 1), dtype=np.float32)
     alpha_mask[valid_mask] = alpha
+
+    # Clipped enclosure corners -> 0 alpha (they vanish in the overlay). Warp the
+    # corner KEEP mask through the same projection and fold it into the alpha.
+    keep_t = KEEP.astype(np.float32)
+    if keep_t.shape == (t_h, t_w):   # full 32x24 frame (legacy 16x24 has no corners)
+        if flip_h and flip_v: keep_t = cv2.flip(keep_t, -1)
+        elif flip_h: keep_t = cv2.flip(keep_t, 1)
+        elif flip_v: keep_t = cv2.flip(keep_t, 0)
+        warped_keep = cv2.remap(keep_t, map_x, map_y, cv2.INTER_NEAREST,
+                                borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        alpha_mask = alpha_mask * warped_keep[:, :, None]
 
     video_writer = None
     

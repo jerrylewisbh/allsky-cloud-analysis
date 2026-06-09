@@ -37,17 +37,24 @@ from typing import Iterator
 import cv2
 import numpy as np
 
+from thermal_utils import reshape_thermal, apply_corner_mask, ambient_from_sensors
+
 # ---- physics thresholds (mirror docs/sky-condition.md and firmware) ----
 # Overridable via env vars so the threshold choice can be A/B-tested without a
 # code edit, e.g. to reproduce the pre-2026-05-24 values:
 #   THERMAL_ABS_C=-18 THERMAL_REL_C=-20 THERMAL_SIGMA_C=6 python make_masks_v2.py ...
-ABS_THRESHOLD_C = float(os.environ.get("THERMAL_ABS_C", -8.0))   # warmer than this absolute => cloud  (was -18, was -5 orig)
+ABS_THRESHOLD_C = float(os.environ.get("THERMAL_ABS_C", -3.0))   # warmer than this absolute => cloud  (ZnSe-windowed; was -8 bare-sky)
 REL_DELTA_C = float(os.environ.get("THERMAL_REL_C", -12.0))      # warmer than (ambient + REL_DELTA) => cloud  (was -20, was -10 orig)
 SIGMOID_SIGMA_C = float(os.environ.get("THERMAL_SIGMA_C", 3.0))  # softness of the cloud transition (°C)  (was 6, original)
 
 # ---- day / night handling (lux from sensors block) ----
-LUX_NIGHT = 1.0              # below: thermal-only
-LUX_DAY = 500.0              # above: full RGB refinement
+# lux now comes from the weather station's solar irradiance (W/m^2 * 126 lm/W),
+# i.e. a real-world daylight scale. Breakpoints in solar-irradiance terms:
+#   LUX_NIGHT 1000 lx ~= 8 W/m^2  (sun below ~-4 deg: too dark for RGB -> thermal only)
+#   LUX_DAY  10000 lx ~= 80 W/m^2 (solid daylight -> full RGB refinement)
+# Between them = twilight blend. Refine empirically from observed dawn/dusk lux.
+LUX_NIGHT = 1000.0          # below: thermal-only
+LUX_DAY = 10000.0           # above: full RGB refinement
 HYTA_NRBR_CLEAR = -0.35      # NRBR <= -0.35 => clear blue sky
 HYTA_NRBR_CLOUD = +0.05      # NRBR >= +0.05 => fully white cloud
 
@@ -178,13 +185,12 @@ def load_thermal(json_path: Path) -> tuple[np.ndarray, dict] | tuple[None, None]
     frame = data.get("frame")
     if not frame:
         return None, None
-    arr = np.asarray(frame, dtype=np.float32)
-    if arr.size == 768:
-        arr = arr.reshape((24, 32))
-    elif arr.size == 384:
-        arr = arr.reshape((16, 24))
-    else:
+    try:
+        arr, _ = reshape_thermal(frame)
+    except ValueError:
         return None, None
+    # NaN the clipped corners; the warp + np.isnan() handling below excludes them.
+    arr = apply_corner_mask(arr)
     return arr, data.get("sensors", {}) or {}
 
 
@@ -296,7 +302,7 @@ def process_frame(fp: FramePaths, config: dict) -> dict | None:
     invalid_thermal = invalid_thermal | np.isnan(warped_thermal)
 
     # ---- thermal cloud probability (per-pixel firmware physics) ----
-    ambient = float(sensors.get("temp", 20.0))
+    ambient = ambient_from_sensors(sensors)
     p_abs = sigmoid((warped_thermal - ABS_THRESHOLD_C) / SIGMOID_SIGMA_C)
     p_rel = sigmoid((warped_thermal - (ambient + REL_DELTA_C)) / SIGMOID_SIGMA_C)
     p_thermal = np.maximum(p_abs, p_rel)
