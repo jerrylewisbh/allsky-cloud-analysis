@@ -2,13 +2,13 @@
     "proj_on": 1,
     "flip_h": 0,
     "flip_v": 1,
-    "fov": 88.38,
-    "rot": 286.25,
+    "fov": 82,
+    "rot": 288,
     "x_off": -0.01,
-    "y_off": 0.085,
+    "y_off": 0.05,
     "dist": 0.0,
-    "alpha": 0.81,
-    "cmap": 4,
+    "alpha": 1.0,
+    "cmap": 0,
     "render_mode": 0,
     "threshold_val": 141
 }
