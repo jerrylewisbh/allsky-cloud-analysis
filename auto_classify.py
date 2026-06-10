@@ -492,15 +492,10 @@ def classify(weak: dict[tuple, dict],
     # rule out Ns. Without this, Rule 5 below forces family="low" on high opacity
     # and Rule 6 returns Sc. Conservative guard: require uniformity (std<0.10) so
     # textured altostratus isn't swept in. Low confidence — labeler verifies.
-    if (thermal_mean_p is not None and thermal_mean_p > 0.6
-            and goes_phase in ("ice", "mixed")
-            and metar_okta is not None and metar_okta >= 6
-            and thermal_std is not None and thermal_std < 0.10):
-        return "ns_cb", "low", (
-            f"opaque uniform deck (thermal_p={thermal_mean_p:.2f}, "
-            f"std={thermal_std:.2f}) + frozen tops (phase={goes_phase}) + "
-            f"METAR {metar_okta}/8 → glaciated deep cloud (ns_cb)"
-        )
+    # Rule 4.6 (glaciated opaque deck -> ns_cb) REMOVED: genuine ns_cb is
+    # indistinguishable from thick Ac/As on scalar signals here (both dry), so
+    # this was ~all false positives. ns_cb now needs rain (Rule 1) or METAR
+    # CB/TCU (Rule 4); dry frozen decks fall through to family.
 
     # ---- Rule 5: family from GOES height (preferred) or METAR ----
     family = None
@@ -515,13 +510,9 @@ def classify(weak: dict[tuple, dict],
         # so a warm thermal under a GOES-confirmed ice top is a window-heating
         # artifact (the window stays warm into twilight/early night) or a layer
         # below high cirrus — never grounds to demote the family to low Sc.
-        if (not is_day) and goes_phase != "ice" and thermal_mean_p is not None and thermal_mean_p > 0.60:
-            family = "low"
-            family_reason = f"GOES height {goes_height:.0f}m but high opacity (night, non-ice) suggests {family}"
-        elif (not is_day) and goes_phase != "ice" and thermal_mean_p is not None and thermal_mean_p > 0.40 and goes_height > 2000:
-            family = "mid"
-            family_reason = f"GOES height {goes_height:.0f}m but moderate opacity (night, non-ice) suggests {family}"
-        elif goes_height < 2000:
+        # Night "opaque => low" override removed (obsolete post-ZnSe-recal: opaque
+        # now means THICK, not LOW). Defer to GOES cloud-top height below.
+        if goes_height < 2000:
             family = "low"
             family_reason = f"GOES height {goes_height:.0f}m → {family}"
         elif goes_height < 7000 and goes_phase == "ice":
@@ -558,6 +549,13 @@ def classify(weak: dict[tuple, dict],
             )
         else:
             return "unknown", "low", "cloud present but altitude family unknown"
+
+    # Opacity sanity (recal-enabled): cirriform is optically THIN, so a GOES
+    # "high" family on a very opaque patch (mean>0.8) is a thick deck (As), not
+    # cirrus. Demote to mid so Rule 6 returns Ac/As instead of Cs/Cc.
+    if family == "high" and thermal_mean_p is not None and thermal_mean_p > 0.8:
+        family = "mid"
+        family_reason += "; opaque (mean>0.8) -> not cirriform, demote to mid"
 
     base_conf = "medium" if confident_cloud else "low"
     reasoning_bits = [family_reason]

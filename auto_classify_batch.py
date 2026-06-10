@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import os
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -30,16 +31,30 @@ WEAK_LABELS_CSV = PROJECT_ROOT / "labels" / "weak_labels.csv"
 HAND_LABELS_CSV = PROJECT_ROOT / "labels" / "hand_labeled.csv"
 AUTO_LABELS_CSV = PROJECT_ROOT / "labels" / "auto_labels.csv"
 
+# Opt-in recalibration switch (default OFF — production behaviour unchanged).
+# The soft sigmoid in make_masks_v2 (ABS=-3, SIGMA=3) is mis-centred for the
+# ZnSe-windowed sensor, so the per-pixel MEAN cloud probability has no usable
+# low end (clear sky reads ~0.18, overlapping cloud). The p50 cloud FRACTION —
+# pixels with prob >= 0.5 — thresholds the sigmoid at its midpoint and recovers
+# the firmware's hard cutoff, so it reads ~0 for clear and ~1 for overcast.
+# When THERMAL_USE_P50=1, feed that fraction to the classifier as thermal_mean_p
+# instead of the mean. NOTE: the rule thresholds in auto_classify.py were tuned
+# to the mean's scale, so flipping this on alone is expected to shift the class
+# mix — always A/B with `analyze_labels.py --auto` before adopting it, and pair
+# it with the rule re-tune. The proper fix is recalibrating the mask sigmoid
+# (see calibrate_thermal.py); this flag is the no-regen stopgap.
+USE_P50 = os.environ.get("THERMAL_USE_P50", "0").lower() in ("1", "true", "yes")
+
 
 def thermal_mean(mask_path: Path) -> float | None:
     """Mean cloud probability over valid pixels. Backward-compatible — kept
     as a thin wrapper around thermal_stats() so older callers still work."""
-    m, _ = thermal_stats(mask_path)
+    m, _, _ = thermal_stats(mask_path)
     return m
 
 
-def thermal_stats(mask_path: Path) -> tuple[float | None, float | None]:
-    """Returns (mean, std) of cloud probability over valid pixels.
+def thermal_stats(mask_path: Path) -> tuple[float | None, float | None, float | None]:
+    """Returns (mean, std, frac_p50) of cloud probability over valid pixels.
 
     The std measures spatial variance — a textbook discriminator between:
       - uniform sky (clear or overcast Sc/St): low std
@@ -49,13 +64,19 @@ def thermal_stats(mask_path: Path) -> tuple[float | None, float | None]:
     which the per-frame vote cascade cannot do (it operates on the scalar
     mean only). Computing std is essentially free since the mask is already
     loaded for the mean.
+
+    frac_p50 is the fraction of valid pixels with prob >= 0.5 — i.e. the same
+    quantity make_masks_v2 stores as `cloud_fraction` and the firmware reports
+    as its cloud fraction. Unlike the mean, it thresholds the soft sigmoid at
+    its midpoint, so it stays ~0 for clear sky even while the sigmoid is
+    mis-centred. See USE_P50 above.
     """
     raw = np.array(Image.open(mask_path).convert("L"))
     valid = raw != 255
     if not valid.any():
-        return None, None
+        return None, None, None
     probs = raw[valid].astype(np.float32) / 254.0
-    return float(probs.mean()), float(probs.std())
+    return float(probs.mean()), float(probs.std()), float((probs >= 0.5).mean())
 
 
 def _rgb_and_valid(rgb_path: Path, mask_path: Path):
@@ -154,13 +175,14 @@ def reclassify_frame(frame_id: str, mask_path: str, rgb_path: str,
         return None
 
     weak = load_weak_labels()
-    mp, mstd = thermal_stats(Path(mask_path))
+    mp, mstd, mfrac = thermal_stats(Path(mask_path))
+    thermal_signal = mfrac if USE_P50 else mp
     nrbr_p95 = rgb_nrbr_p95_in_valid_region(Path(rgb_path), Path(mask_path))
     v_mean, v_std = rgb_v_stats_in_valid_region(Path(rgb_path), Path(mask_path))
     align_mi = read_alignment_mi(Path(meta_path)) if meta_path else None
     wf = weak.get(frame_id, {})
     cls, conf, reasoning = classify(
-        wf, thermal_mean_p=mp,
+        wf, thermal_mean_p=thermal_signal,
         rgb_nrbr_p95=nrbr_p95,
         rgb_v_mean=v_mean,
         rgb_v_std=v_std,
@@ -173,6 +195,7 @@ def reclassify_frame(frame_id: str, mask_path: str, rgb_path: str,
         "auto_reasoning": reasoning,
         "thermal_mean_p": f"{mp:.3f}" if mp is not None else "",
         "thermal_std": f"{mstd:.3f}" if mstd is not None else "",
+        "cloud_fraction_p50": f"{mfrac:.3f}" if mfrac is not None else "",
         "rgb_nrbr_p95": f"{nrbr_p95:+.3f}" if nrbr_p95 is not None else "",
         "rgb_v_mean": f"{v_mean:.1f}" if v_mean is not None else "",
         "rgb_v_std": f"{v_std:.1f}" if v_std is not None else "",
@@ -214,6 +237,8 @@ def main():
     hand = load_hand_labels()
     frames = discover_frames(args.datasets)
     print(f"Frames: {len(frames)}  ·  weak-label coverage: {len(weak)}  ·  hand labels: {len(hand)}")
+    if USE_P50:
+        print("  THERMAL_USE_P50=1 → feeding cloud_fraction_p50 (not mean) to the classifier")
     if not frames:
         print(f"No frames matched '{args.datasets}' — nothing to classify.")
         return
@@ -222,12 +247,13 @@ def main():
     dist = Counter()
     conf_dist = Counter()
     for i, (fid, mask_path, rgb_path, meta_path) in enumerate(frames):
-        mp, mstd = thermal_stats(Path(mask_path))
+        mp, mstd, mfrac = thermal_stats(Path(mask_path))
+        thermal_signal = mfrac if USE_P50 else mp
         nrbr_p95 = rgb_nrbr_p95_in_valid_region(Path(rgb_path), Path(mask_path))
         v_mean, v_std = rgb_v_stats_in_valid_region(Path(rgb_path), Path(mask_path))
         align_mi = read_alignment_mi(Path(meta_path))
         wf = weak.get(fid, {})
-        cls, conf, reasoning = classify(wf, thermal_mean_p=mp,
+        cls, conf, reasoning = classify(wf, thermal_mean_p=thermal_signal,
                                          rgb_nrbr_p95=nrbr_p95,
                                          rgb_v_mean=v_mean,
                                          rgb_v_std=v_std,
@@ -239,6 +265,7 @@ def main():
             "auto_reasoning": reasoning,
             "thermal_mean_p": f"{mp:.3f}" if mp is not None else "",
             "thermal_std": f"{mstd:.3f}" if mstd is not None else "",
+            "cloud_fraction_p50": f"{mfrac:.3f}" if mfrac is not None else "",
             "rgb_nrbr_p95": f"{nrbr_p95:+.3f}" if nrbr_p95 is not None else "",
             "rgb_v_mean": f"{v_mean:.1f}" if v_mean is not None else "",
             "rgb_v_std": f"{v_std:.1f}" if v_std is not None else "",

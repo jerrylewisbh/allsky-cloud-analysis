@@ -43,9 +43,21 @@ from thermal_utils import reshape_thermal, apply_corner_mask, ambient_from_senso
 # Overridable via env vars so the threshold choice can be A/B-tested without a
 # code edit, e.g. to reproduce the pre-2026-05-24 values:
 #   THERMAL_ABS_C=-18 THERMAL_REL_C=-20 THERMAL_SIGMA_C=6 python make_masks_v2.py ...
-ABS_THRESHOLD_C = float(os.environ.get("THERMAL_ABS_C", -3.0))   # warmer than this absolute => cloud  (ZnSe-windowed; was -8 bare-sky)
+#
+# RECALIBRATED 2026-06-09 for the ZnSe window (see calibrate_thermal.py). The
+# warm window compresses clear sky to ~-9..-3.5C, so the previous ABS=-3 / SIGMA=3
+# soft sigmoid sat *inside* the clear-sky band and scored clear sky ~0.18 mean
+# (saturating the whole 0..1 range). ABS=-1 / SIGMA=1 drives clear sky to ~0.01
+# mean while overcast stays ~1.0 (verified: firmware-clear frames median 0.006,
+# the 013646 clear frame 0.184 -> 0.005).
+#   NB: this offline ABS (-1) is INTENTIONALLY warmer than the firmware's hard
+#   cutoff (-3 in sky_thermal.h). The firmware COUNTS pixels above the cutoff;
+#   we take a soft-sigmoid MEAN over the pixel spread, so our center must sit
+#   ~2C higher to push the same clear distribution to ~0. The divergence is
+#   expected — do not "fix" it to match the firmware.
+ABS_THRESHOLD_C = float(os.environ.get("THERMAL_ABS_C", -1.0))   # warmer than this absolute => cloud  (ZnSe soft-sigmoid; firmware hard cutoff is -3)
 REL_DELTA_C = float(os.environ.get("THERMAL_REL_C", -12.0))      # warmer than (ambient + REL_DELTA) => cloud  (was -20, was -10 orig)
-SIGMOID_SIGMA_C = float(os.environ.get("THERMAL_SIGMA_C", 3.0))  # softness of the cloud transition (°C)  (was 6, original)
+SIGMOID_SIGMA_C = float(os.environ.get("THERMAL_SIGMA_C", 1.0))  # softness of the cloud transition (°C)  (was 3, mis-centred for ZnSe)
 
 # ---- day / night handling (lux from sensors block) ----
 # lux now comes from the weather station's solar irradiance (W/m^2 * 126 lm/W),
