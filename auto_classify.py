@@ -506,12 +506,17 @@ def classify(weak: dict[tuple, dict],
     family = None
     family_reason = ""
     if goes_height is not None and goes_height > 0:
-        if thermal_mean_p is not None and thermal_mean_p > 0.60:
+        # The thermal-opacity overrides below are only trustworthy at NIGHT. In
+        # daytime, solar heating of the ZnSe window/enclosure inflates
+        # thermal_mean_p (a warm bias unrelated to cloud height), so a thin
+        # mid/high layer reads "opaque" and would be wrongly demoted to low (Sc).
+        # In daylight, defer to the GOES cloud-top height (the preferred signal).
+        if (not is_day) and thermal_mean_p is not None and thermal_mean_p > 0.60:
             family = "low"
-            family_reason = f"GOES height {goes_height:.0f}m but high opacity suggests {family}"
-        elif thermal_mean_p is not None and thermal_mean_p > 0.40 and goes_height > 2000:
+            family_reason = f"GOES height {goes_height:.0f}m but high opacity (night) suggests {family}"
+        elif (not is_day) and thermal_mean_p is not None and thermal_mean_p > 0.40 and goes_height > 2000:
             family = "mid"
-            family_reason = f"GOES height {goes_height:.0f}m but moderate opacity suggests {family}"
+            family_reason = f"GOES height {goes_height:.0f}m but moderate opacity (night) suggests {family}"
         elif goes_height < 2000:
             family = "low"
             family_reason = f"GOES height {goes_height:.0f}m → {family}"
