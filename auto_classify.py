@@ -511,12 +511,16 @@ def classify(weak: dict[tuple, dict],
         # thermal_mean_p (a warm bias unrelated to cloud height), so a thin
         # mid/high layer reads "opaque" and would be wrongly demoted to low (Sc).
         # In daylight, defer to the GOES cloud-top height (the preferred signal).
-        if (not is_day) and thermal_mean_p is not None and thermal_mean_p > 0.60:
+        # ...and never for an ice-phase cloud: ice means cold/high (cirriform),
+        # so a warm thermal under a GOES-confirmed ice top is a window-heating
+        # artifact (the window stays warm into twilight/early night) or a layer
+        # below high cirrus — never grounds to demote the family to low Sc.
+        if (not is_day) and goes_phase != "ice" and thermal_mean_p is not None and thermal_mean_p > 0.60:
             family = "low"
-            family_reason = f"GOES height {goes_height:.0f}m but high opacity (night) suggests {family}"
-        elif (not is_day) and thermal_mean_p is not None and thermal_mean_p > 0.40 and goes_height > 2000:
+            family_reason = f"GOES height {goes_height:.0f}m but high opacity (night, non-ice) suggests {family}"
+        elif (not is_day) and goes_phase != "ice" and thermal_mean_p is not None and thermal_mean_p > 0.40 and goes_height > 2000:
             family = "mid"
-            family_reason = f"GOES height {goes_height:.0f}m but moderate opacity (night) suggests {family}"
+            family_reason = f"GOES height {goes_height:.0f}m but moderate opacity (night, non-ice) suggests {family}"
         elif goes_height < 2000:
             family = "low"
             family_reason = f"GOES height {goes_height:.0f}m → {family}"
