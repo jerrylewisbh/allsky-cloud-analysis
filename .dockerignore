@@ -4,3 +4,7 @@
 *
 !api/
 !requirements.txt
+# labeling-tool image (Dockerfile.labeling) shares this build context and
+# COPYs these two — without re-including them they're stripped and COPY fails.
+!labeling_tool.py
+!auto_classify.py
