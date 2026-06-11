@@ -943,6 +943,77 @@ def make_overlay(rgb_path: str, mask_path: str,
     return overlay.clip(0, 255).astype(np.uint8)
 
 
+def render_mask_legend(colormap_name: str,
+                       overlay_style: str,
+                       overlay_threshold: float,
+                       show_gradient: bool,
+                       gradient_saturation: float) -> None:
+    """Color-scale legend for the mask panels.
+
+    Renders the *currently selected* colormap as a gradient bar with labelled
+    endpoints, a threshold marker (for hard/contour overlays), and a no-data
+    swatch matching the diagonal grey stripe used in the panels. Adapts its
+    wording for the Sobel edge-gradient view, whose values mean "magnitude of
+    cloud-probability change" rather than "cloud probability".
+    """
+    lut = COLORMAPS.get(colormap_name, SKY_CLOUD_LUT)
+    # Sample the LUT into CSS gradient stops so the bar matches the panels
+    # exactly, whatever colormap is chosen.
+    n = 24
+    stops = []
+    for i in range(n + 1):
+        x = i / n
+        r, g, b = (int(c) for c in lut[int(round(x * 255))])
+        stops.append(f"rgb({r},{g},{b}) {x * 100:.1f}%")
+    gradient = "linear-gradient(to right, " + ", ".join(stops) + ")"
+    # No-data swatch: same alternating mid-greys as the panel stripe.
+    nodata = ("repeating-linear-gradient(45deg, rgb(60,60,60) 0 4px, "
+              "rgb(100,100,100) 4px 8px)")
+
+    marker = ""
+    note = ""
+    if show_gradient:
+        title = "Sobel edge gradient — rate of change of cloud probability"
+        left_lbl, mid_lbl = "uniform region", ""
+        right_lbl = f"sharp edge (≥ {gradient_saturation:.2f}/px)"
+    else:
+        title = "Cloud probability (thermal mask)"
+        left_lbl, mid_lbl, right_lbl = "0.0 · clear sky", "0.5", "1.0 · dense cloud"
+        if overlay_style in ("hard", "contour"):
+            pct = max(0.0, min(100.0, overlay_threshold * 100))
+            marker = (f"<div style='position:absolute;top:-3px;bottom:-3px;"
+                      f"left:{pct:.1f}%;width:2px;background:#fff;"
+                      f"box-shadow:0 0 2px #000;'></div>")
+            note = (f"<div style='margin-top:3px;opacity:0.7;'>"
+                    f"▲ white line = cloud threshold p ≥ {overlay_threshold:.2f} "
+                    f"(used by the <b>{overlay_style}</b> overlay)</div>")
+
+    html = f"""
+    <div style="margin:0.1rem 0 0.6rem 0;font-size:0.8rem;line-height:1.3;">
+      <div style="margin-bottom:4px;opacity:0.85;">{title}</div>
+      <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+        <div style="flex:1;min-width:220px;">
+          <div style="position:relative;height:16px;border-radius:3px;
+                      background:{gradient};
+                      border:1px solid rgba(128,128,128,0.4);">{marker}</div>
+          <div style="display:flex;justify-content:space-between;
+                      margin-top:2px;opacity:0.8;">
+            <span>{left_lbl}</span><span>{mid_lbl}</span><span>{right_lbl}</span>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;white-space:nowrap;">
+          <span style="display:inline-block;width:16px;height:16px;border-radius:3px;
+                       background:{nodata};
+                       border:1px solid rgba(128,128,128,0.4);"></span>
+          <span style="opacity:0.8;">no-data (outside sensor FOV)</span>
+        </div>
+      </div>
+      {note}
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
+
 def thermal_cloud_stats(mask_path: str) -> tuple[float, float, float, float]:
     """Returns (mean_cloud_prob_over_valid, fraction_above_0.5_over_valid,
     no_data_fraction, std_cloud_prob_over_valid).
@@ -1685,6 +1756,9 @@ def main() -> None:
                 caption=f"Cloud probability heatmap ({colormap_name}) — grey diagonal stripe = no-data",
                 use_container_width=True,
             )
+
+    render_mask_legend(colormap_name, overlay_style, overlay_threshold,
+                       show_gradient, gradient_saturation)
 
     render_cleanup_panel(pair, mean_p, colormap_name)
 
