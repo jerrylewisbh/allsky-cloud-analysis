@@ -1913,10 +1913,16 @@ def main() -> None:
                 )
             render_temp_legend(lo_c, hi_c, colormap_name, fixed=fixed)
         else:
-            local_date = parse_local_date(pair["frame_id"]) or "<YYYYMMDD>"
+            # Derive the day from the DATASET folder (dataset_v2_YYYYMMDD), not the
+            # frame filename — post-midnight frames carry the next day's timestamp
+            # but belong to the previous night's capture-day dataset, so the
+            # filename date would send you to regenerate the wrong day.
+            ds_m = re.search(r"dataset_v2_(\d{8})", pair["mask_path"])
+            ds_day = ds_m.group(1) if ds_m else (parse_local_date(pair["frame_id"]) or "<YYYYMMDD>")
             st.caption(
                 f"Raw thermal not available for this frame — regenerate this day "
-                f"with `python make_masks_v2.py --day {local_date}` to enable the "
+                f"with `make_masks_v2.py --day {ds_day}` (or "
+                f"`deploy/cron/daily-mask-gen.sh {ds_day} 8 --force`) to enable the "
                 "temperature view (older masks predate this artifact)."
             )
 
