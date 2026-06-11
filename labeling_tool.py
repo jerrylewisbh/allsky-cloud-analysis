@@ -858,7 +858,12 @@ def gradient_view(mask_path: str, colormap: str = "sky_cloud (custom)",
 def colorize_mask(mask_path: str, colormap: str = "sky_cloud (custom)") -> np.ndarray:
     raw = np.array(Image.open(mask_path).convert("L"))
     valid = raw != NO_DATA_VALUE
-    legacy_binary = raw.max() <= 1 or len(np.unique(raw)) <= 2
+    # Legacy (matched_crop-era) masks are true 0/1 binary. Detect ONLY that.
+    # The old `len(np.unique(raw)) <= 2` test also fired on a fully-overcast v2
+    # mask — whose pixels are just {254 cloud, 255 no-data}, i.e. 2 values —
+    # which then erased the no-data corners and flattened the heatmap to solid
+    # red. 255 is always no-data under the v2 convention; honor it unconditionally.
+    legacy_binary = raw.max() <= 1
     if legacy_binary:
         valid = np.ones_like(raw, dtype=bool)
         probs_u8 = np.where(raw > 127, 255, 0).astype(np.uint8)
