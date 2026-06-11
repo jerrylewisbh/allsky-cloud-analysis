@@ -82,14 +82,17 @@ def discover_pairs(root: Path, glob_pattern: str) -> list[dict]:
         mask_dir = ds_dir / "masks"
         if not img_dir.is_dir() or not mask_dir.is_dir():
             continue
+        thermal_dir = ds_dir / "thermal"
         for jpg in sorted(img_dir.glob("*.jpg")):
             png = mask_dir / f"{jpg.stem}.png"
             if not png.exists():
                 continue
+            temp_png = thermal_dir / f"{jpg.stem}.png"
             pairs.append({
                 "frame_id": jpg.stem,
                 "rgb_path": str(jpg.resolve()),
                 "mask_path": str(png.resolve()),
+                "temp_path": str(temp_png.resolve()) if temp_png.exists() else None,
                 "timestamp": parse_timestamp(jpg.stem),
             })
     return pairs
@@ -879,6 +882,100 @@ def colorize_mask(mask_path: str, colormap: str = "sky_cloud (custom)") -> np.nd
     return colored
 
 
+def colorize_temperature(temp_path: str, colormap: str = "sky_cloud (custom)",
+                         plo: float = 2.0, phi: float = 98.0,
+                         fixed_range: tuple[float, float] | None = None
+                         ) -> tuple[np.ndarray, float, float]:
+    """Colorize the raw warped thermal temperature.
+
+    The probability mask saturates warm/overcast skies to a flat color (the
+    sigmoid is near-binary by design), hiding real cloud-thickness structure.
+    This view recovers it: the thermal artifact stores actual temperature as
+    uint16 centi-Kelvin (0 = no-data; see make_masks_v2.py). We decode to °C and
+    map a [lo, hi] °C window across the full palette, then index the selected LUT.
+
+    Scaling:
+      - fixed_range=None (default): per-frame robust auto-stretch — lo/hi are the
+        [plo, phi] percentiles of this frame, so whatever spread exists fills the
+        colormap. Maximizes visible structure; colors aren't comparable between
+        frames.
+      - fixed_range=(lo, hi): map that absolute °C window on every frame, so a
+        given color means the same temperature across frames. Comparable, but
+        flatter on low-contrast frames.
+
+    Returns (colored_rgb, lo_c, hi_c) — the °C window actually used, for the
+    caption + legend. lo == hi falls back to a 1 °C span to avoid divide-by-zero.
+    """
+    raw = cv2.imread(temp_path, cv2.IMREAD_ANYDEPTH)
+    if raw is None:
+        raise FileNotFoundError(temp_path)
+    valid = raw != 0
+    temp_c = raw.astype(np.float32) / 100.0 - 273.15
+
+    if fixed_range is not None:
+        lo, hi = fixed_range
+    elif valid.any():
+        lo, hi = np.percentile(temp_c[valid], [plo, phi])
+    else:
+        lo, hi = 0.0, 1.0
+    lo, hi = float(lo), float(hi)
+    if hi - lo < 1e-3:
+        hi = lo + 1.0  # flat frame: avoid divide-by-zero, palette stays uniform
+
+    norm = np.clip((temp_c - lo) / (hi - lo), 0.0, 1.0)
+    idx = np.where(valid, (norm * 254).astype(np.uint8), 0)
+    lut = COLORMAPS.get(colormap, SKY_CLOUD_LUT)
+    colored = lut[idx]
+
+    # No-data: same diagonal mid-grey stripe as the other mask panels.
+    yy, xx = np.indices(raw.shape)
+    stripe = ((yy + xx) // 6) % 2 == 0
+    colored[(~valid) & stripe] = (60, 60, 60)
+    colored[(~valid) & ~stripe] = (100, 100, 100)
+    return colored, lo, hi
+
+
+def render_temp_legend(lo_c: float, hi_c: float, colormap_name: str,
+                       fixed: bool = False) -> None:
+    """Color-scale legend for the raw-temperature view (mirrors render_mask_legend
+    but labelled in °C). Adapts wording for fixed-absolute vs per-frame stretch."""
+    lut = COLORMAPS.get(colormap_name, SKY_CLOUD_LUT)
+    n = 24
+    stops = []
+    for i in range(n + 1):
+        x = i / n
+        r, g, b = (int(c) for c in lut[int(round(x * 255))])
+        stops.append(f"rgb({r},{g},{b}) {x * 100:.1f}%")
+    gradient = "linear-gradient(to right, " + ", ".join(stops) + ")"
+    nodata = ("repeating-linear-gradient(45deg, rgb(60,60,60) 0 4px, "
+              "rgb(100,100,100) 4px 8px)")
+    mid_c = (lo_c + hi_c) / 2.0
+    scale_desc = ("fixed absolute scale (comparable across frames)" if fixed
+                  else "auto-stretched (2–98th pct, per-frame)")
+    html = f"""
+    <div style="margin:0.1rem 0 0.6rem 0;font-size:0.8rem;line-height:1.3;">
+      <div style="margin-bottom:4px;opacity:0.85;">Raw thermal temperature — {scale_desc}, colder → warmer</div>
+      <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+        <div style="flex:1;min-width:220px;">
+          <div style="position:relative;height:16px;border-radius:3px;
+                      background:{gradient};
+                      border:1px solid rgba(128,128,128,0.4);"></div>
+          <div style="display:flex;justify-content:space-between;
+                      margin-top:2px;opacity:0.8;">
+            <span>{lo_c:.1f} °C</span><span>{mid_c:.1f} °C</span><span>{hi_c:.1f} °C</span>
+          </div>
+        </div>
+        <div style="display:flex;align-items:center;gap:6px;">
+          <span style="display:inline-block;width:16px;height:16px;border-radius:3px;
+                       background:{nodata};border:1px solid rgba(128,128,128,0.4);"></span>
+          <span style="opacity:0.8;">no-data</span>
+        </div>
+      </div>
+    </div>
+    """
+    st.markdown(html, unsafe_allow_html=True)
+
+
 def _load_mask_components(mask_path: str, rgb_shape: tuple[int, int]):
     """Returns (probs in [0,1] for valid px, valid_mask bool, raw uint8 resized)."""
     raw = np.array(Image.open(mask_path).convert("L"))
@@ -1485,6 +1582,39 @@ def main() -> None:
             help="Gradient value (prob/pixel) at which the colormap saturates. "
                  "Lower = amplify subtle texture; higher = only show strong edges.",
         ) if show_gradient else 0.30
+        show_thermal = st.checkbox(
+            "Raw thermal temperature view",
+            value=False,
+            help=(
+                "Adds a panel showing the actual MLX90640 temperature (°C) "
+                "across the selected colormap. The cloud-probability mask is "
+                "near-binary — it saturates warm/overcast skies to one flat "
+                "color — so this view recovers the cloud-thickness structure the "
+                "probability mask discards. Use the colormap dropdown to surface "
+                "texture for genus calls."
+            ),
+        )
+        thermal_scale = st.radio(
+            "Temperature scale",
+            ["Auto-stretch (per-frame)", "Fixed absolute (°C)"],
+            index=0,
+            horizontal=True,
+            help=(
+                "**Auto-stretch**: each frame's own min→max (robust 2–98th pct) "
+                "fills the palette — maximizes visible structure, but colors "
+                "aren't comparable between frames. "
+                "**Fixed absolute**: a constant °C window maps the same on every "
+                "frame — a given color always means the same temperature "
+                "(comparable across frames), but flatter on low-contrast frames."
+            ),
+        ) if show_thermal else "Auto-stretch (per-frame)"
+        thermal_fixed_range = st.slider(
+            "Fixed °C range",
+            min_value=-60, max_value=60, value=(-40, 20), step=1,
+            help="Absolute temperature window mapped onto the palette in "
+                 "fixed-scale mode. Clouds/overcast read warm; clear sky reads "
+                 "cold.",
+        ) if (show_thermal and thermal_scale.startswith("Fixed")) else None
 
     # (weak_mtime hoisted to top of main() — used by both sidebar filter
     # and per-frame block.)
@@ -1764,6 +1894,31 @@ def main() -> None:
 
     render_mask_legend(colormap_name, overlay_style, overlay_threshold,
                        show_gradient, gradient_saturation)
+
+    if show_thermal:
+        if pair.get("temp_path"):
+            fixed = thermal_fixed_range is not None
+            colored_t, lo_c, hi_c = colorize_temperature(
+                pair["temp_path"], colormap=colormap_name,
+                fixed_range=(tuple(thermal_fixed_range) if fixed else None))
+            scale_lbl = "fixed scale" if fixed else "auto-stretched"
+            t_cols = st.columns(3)
+            with t_cols[0]:
+                st.image(
+                    colored_t,
+                    caption=(f"Raw thermal temperature ({colormap_name}) — "
+                             f"{lo_c:.1f}…{hi_c:.1f} °C, {scale_lbl} · "
+                             "structure the probability mask saturates away"),
+                    use_container_width=True,
+                )
+            render_temp_legend(lo_c, hi_c, colormap_name, fixed=fixed)
+        else:
+            local_date = parse_local_date(pair["frame_id"]) or "<YYYYMMDD>"
+            st.caption(
+                f"Raw thermal not available for this frame — regenerate this day "
+                f"with `python make_masks_v2.py --day {local_date}` to enable the "
+                "temperature view (older masks predate this artifact)."
+            )
 
     render_cleanup_panel(pair, mean_p, colormap_name)
 

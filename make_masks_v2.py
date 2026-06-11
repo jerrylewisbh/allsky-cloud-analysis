@@ -358,9 +358,20 @@ def process_frame(fp: FramePaths, config: dict) -> dict | None:
     valid_p = ~np.isnan(p_combined)
     mask_uint8[valid_p] = np.round(np.clip(p_combined[valid_p], 0.0, 1.0) * 254.0).astype(np.uint8)
 
-    # Resize both to OUTPUT_SIZE x OUTPUT_SIZE
+    # Encode raw warped temperature: uint16 centi-Kelvin (0.01 °C resolution),
+    # 0 = no-data. This preserves the actual cloud-thickness structure that the
+    # near-binary probability sigmoid saturates away — the labeling tool
+    # auto-stretches it per-frame for a thermal-structure view. cK = (T+273.15)*100;
+    # range clipped to [1, 65535] so a valid pixel never collides with the 0 sentinel.
+    temp_ck = np.round((warped_thermal + 273.15) * 100.0)
+    temp_ck = np.where(invalid_thermal, 0.0, temp_ck)
+    temp_ck = np.nan_to_num(temp_ck, nan=0.0)
+    temp_uint16 = np.clip(temp_ck, 0, 65535).astype(np.uint16)
+
+    # Resize all to OUTPUT_SIZE x OUTPUT_SIZE
     img_out = cv2.resize(img_crop, (OUTPUT_SIZE, OUTPUT_SIZE), interpolation=cv2.INTER_AREA)
     mask_out = cv2.resize(mask_uint8, (OUTPUT_SIZE, OUTPUT_SIZE), interpolation=cv2.INTER_NEAREST)
+    temp_out = cv2.resize(temp_uint16, (OUTPUT_SIZE, OUTPUT_SIZE), interpolation=cv2.INTER_NEAREST)
 
     # Stats for sidecar JSON
     valid_pixels = mask_out != NO_DATA
@@ -385,6 +396,7 @@ def process_frame(fp: FramePaths, config: dict) -> dict | None:
     return {
         "img": img_out,
         "mask": mask_out,
+        "thermal": temp_out,
         "meta": {
             "frame_id": fp.frame_id,
             "ambient_c": ambient,
@@ -456,6 +468,7 @@ def worker(fp: FramePaths, base_config: dict, out_root: Path,
 
         cv2.imwrite(str(out_root / "images" / f"{fp.frame_id}.jpg"), result["img"])
         cv2.imwrite(str(out_root / "masks" / f"{fp.frame_id}.png"), result["mask"])
+        cv2.imwrite(str(out_root / "thermal" / f"{fp.frame_id}.png"), result["thermal"])
         with open(out_root / "meta" / f"{fp.frame_id}.json", "w") as f:
             json.dump(result["meta"], f, indent=2)
         return fp.frame_id, True, None
@@ -532,6 +545,7 @@ def main():
     out_root = Path(args.output_root or f"dataset_v2_{args.day}")
     (out_root / "images").mkdir(parents=True, exist_ok=True)
     (out_root / "masks").mkdir(parents=True, exist_ok=True)
+    (out_root / "thermal").mkdir(parents=True, exist_ok=True)
     (out_root / "meta").mkdir(parents=True, exist_ok=True)
 
     # Optional per-regime alignment
@@ -563,9 +577,14 @@ def main():
     total_pairs = len(pairs)
     if args.skip_existing:
         masks_dir = out_root / "masks"
-        pairs = [p for p in pairs if not (masks_dir / f"{p.frame_id}.png").exists()]
+        thermal_dir = out_root / "thermal"
+        # Skip only when BOTH the mask and the thermal artifact exist, so a resume
+        # run backfills the thermal PNG onto days masked before it was introduced.
+        pairs = [p for p in pairs
+                 if not ((masks_dir / f"{p.frame_id}.png").exists()
+                         and (thermal_dir / f"{p.frame_id}.png").exists())]
         skipped = total_pairs - len(pairs)
-        print(f"Resume mode: skipping {skipped} frames that already have masks "
+        print(f"Resume mode: skipping {skipped} frames that already have mask + thermal "
               f"({len(pairs)} new + {skipped} existing = {total_pairs} total)")
 
     print(f"Found {len(pairs)} paired frames for {args.day} — processing with {args.jobs} jobs")
