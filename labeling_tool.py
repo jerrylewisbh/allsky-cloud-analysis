@@ -1666,6 +1666,23 @@ def main() -> None:
                 st.session_state.frame_started_at = time.time()
                 st.rerun()
 
+        if st.button("🎲 Random Unlabeled (uniform)", use_container_width=True,
+                     help="Picks an unlabeled frame uniformly at random — no "
+                          "auto-class balancing. Every unlabeled frame is equally "
+                          "likely, so the natural sky-condition distribution is "
+                          "preserved (unlike the balanced button, which "
+                          "over-samples rare classes)."):
+            import random
+
+            unlabeled = [i for i, p in enumerate(pairs)
+                         if p["frame_id"] not in labeled_ids]
+            if not unlabeled:
+                st.sidebar.success("All frames have been labeled!")
+            else:
+                st.session_state.idx = random.choice(unlabeled)
+                st.session_state.frame_started_at = time.time()
+                st.rerun()
+
         idx_input = st.number_input(
             "Frame index", min_value=0, max_value=len(pairs) - 1,
             value=int(st.session_state.idx), step=1,
